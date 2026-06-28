@@ -1,0 +1,22 @@
+# --- Core ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
+
+# --- DB / migrations ---
+sqlalchemy==2.0.35
+alembic==1.13.2
+psycopg[binary]==3.2.9
+
+# --- LLM (Groq via OpenAI-compatible API now; Anthropic later) ---
+openai==1.51.0
+anthropic==0.34.2
+
+# --- Integrations ---
+httpx==0.27.2
+
+# --- Dev ---
+ruff==0.6.8
+pytest==8.3.3
