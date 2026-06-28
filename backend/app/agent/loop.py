@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.agent.llm import LLMClient, ToolCall
+from app.agent.reviewer import review_files
 from app.agent.system_prompt import SYSTEM_PROMPT
 from app.audit.recorder import ToolResult, record_tool_call
 from app.tools.context import RunContext
@@ -59,6 +60,10 @@ def run_agent(task: str, *, max_steps: int = MAX_STEPS) -> AgentRun:
         _append_assistant_turn(messages, llm.provider, response.text, response.tool_calls)
 
         for tc in response.tool_calls:
+            if tc.name == "open_pull_request" and isinstance(
+                tc.arguments.get("files"), list
+            ) and tc.arguments["files"]:
+                _self_review(run_id, step, task, tc, llm)
             result = _dispatch(run_id, step, registry, tc)
             if result.success and result.output and "pr_url" in result.output:
                 run.pr_url = result.output["pr_url"]
@@ -67,6 +72,40 @@ def run_agent(task: str, *, max_steps: int = MAX_STEPS) -> AgentRun:
         run.final_text = "Reached max steps without finishing."
 
     return run
+
+
+def _self_review(
+    run_id: uuid.UUID,
+    step: int,
+    task: str,
+    tc: ToolCall,
+    llm: LLMClient,
+) -> None:
+    """Re-read generated files for bugs before the PR opens, in place.
+
+    Audited as a `self_review_code` step. Any failure leaves the original files
+    untouched — the review can only help, never block the PR.
+    """
+    files = tc.arguments["files"]
+    holder: dict[str, Any] = {}
+
+    def fn() -> ToolResult:
+        reviewed, changed = review_files(task, files, llm)
+        holder["files"] = reviewed
+        return ToolResult(
+            success=True,
+            output={"reviewed": len(files), "changed_paths": changed},
+        )
+
+    record_tool_call(
+        run_id=run_id,
+        step=step,
+        tool_name="self_review_code",
+        tool_input={"paths": [f.get("path") for f in files]},
+        fn=fn,
+    )
+    if holder.get("files"):
+        tc.arguments["files"] = holder["files"]
 
 
 def _dispatch(
