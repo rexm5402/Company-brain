@@ -61,6 +61,26 @@ class LLMClient:
             return self._chat_openai(system=system, messages=messages, tools=tools)
         return self._chat_anthropic(system=system, messages=messages, tools=tools)
 
+    def complete(self, *, system: str, user: str, temperature: float = 0.0) -> str:
+        """Plain text completion (no tools). Used by the consensus detector."""
+        if self.provider == "groq":
+            resp = self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=temperature,
+            )
+            return resp.choices[0].message.content or ""
+        resp = self._client.messages.create(
+            model=self._model,
+            max_tokens=1024,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        return "\n".join(b.text for b in resp.content if b.type == "text")
+
     # --- Groq / OpenAI-compatible ---------------------------------------
     def _chat_openai(
         self, *, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]

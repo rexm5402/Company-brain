@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     # Slack (Weekend 2)
     slack_bot_token: str = ""
+    slack_watch_channel: str = ""  # channel name (e.g. #all-new-workspace) or ID
 
 
 @lru_cache
