@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Company Brain OS — Engineering Agent</title>
+<style>
+  :root {
+    --bg: #0d0f17;
+    --panel: #151823;
+    --panel-2: #1b1f2e;
+    --border: #262b3d;
+    --text: #e7eaf3;
+    --muted: #8b93a7;
+    --faint: #5b6378;
+    --accent: #6d5dfc;
+    --accent-2: #4A154B;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --slack: #611f69;
+    --term-bg: #0a0c12;
+    --term-green: #4ade80;
+    --term-blue: #60a5fa;
+    --term-gray: #6b7280;
+    --radius: 14px;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--sans);
+    background: radial-gradient(1200px 600px at 80% -10%, #1a1330 0%, transparent 60%), var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ---------- Top bar ---------- */
+  .topbar {
+    height: 58px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(21,24,35,0.7);
+    backdrop-filter: blur(8px);
+  }
+  .logo {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), #a855f7);
+    display: grid; place-items: center;
+    font-weight: 800; font-size: 15px; color: white;
+    box-shadow: 0 4px 18px rgba(109,93,252,0.45);
+  }
+  .brand { display: flex; flex-direction: column; line-height: 1.15; }
+  .brand b { font-size: 15px; letter-spacing: .2px; }
+  .brand span { font-size: 11.5px; color: var(--muted); }
+  .topbar .spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--muted);
+    background: var(--panel-2); border: 1px solid var(--border);
+    padding: 6px 11px; border-radius: 999px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+         box-shadow: 0 0 0 0 rgba(52,211,153,.6); animation: pulse 2s infinite; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(52,211,153,.5); }
+    70% { box-shadow: 0 0 0 7px rgba(52,211,153,0); }
+    100% { box-shadow: 0 0 0 0 rgba(52,211,153,0); }
+  }
+
+  /* ---------- Layout ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: 1.05fr 1.25fr;
+    gap: 14px;
+    padding: 14px;
+    height: calc(100vh - 58px);
+  }
+  .col-right {
+    display: grid;
+    grid-template-rows: 1.15fr 1fr;
+    gap: 14px;
+    min-height: 0;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex; flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .card-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 15px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .card-head .title { font-size: 13.5px; font-weight: 650; }
+  .card-head .sub { font-size: 11.5px; color: var(--faint); }
+  .card-head .right { margin-left: auto; }
+
+  /* ---------- Slack chat ---------- */
+  .chan-icon {
+    width: 24px; height: 24px; border-radius: 7px;
+    background: var(--slack); color: #fff;
+    display: grid; place-items: center; font-weight: 800; font-size: 13px;
+  }
+  .chan-select {
+    background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--text); font-family: var(--sans); font-size: 12.5px;
+    padding: 6px 10px; border-radius: 8px; outline: none; cursor: pointer;
+    max-width: 180px;
+  }
+  .chan-select:focus { border-color: var(--accent); }
+  .mode-toggle {
+    display: inline-flex; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  }
+  .mode-btn {
+    background: transparent; border: none; color: var(--muted);
+    font-family: var(--sans); font-size: 12px; font-weight: 600;
+    padding: 6px 10px; cursor: pointer;
+  }
+  .mode-btn.active { background: var(--accent); color: #fff; }
+  .messages {
+    flex: 1; overflow-y: auto; padding: 8px 4px;
+  }
+  .msg { display: flex; gap: 11px; padding: 8px 15px; }
+  .msg:hover { background: rgba(255,255,255,0.02); }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
+    display: grid; place-items: center; font-weight: 700; font-size: 13px; color: #fff;
+  }
+  .a1 { background: linear-gradient(135deg,#fb7185,#f43f5e); }
+  .a2 { background: linear-gradient(135deg,#38bdf8,#0ea5e9); }
+  .a3 { background: linear-gradient(135deg,#fbbf24,#f59e0b); }
+  .a4 { background: linear-gradient(135deg,#34d399,#10b981); }
+  .abot { background: linear-gradient(135deg,var(--accent),#a855f7); }
+  .msg .body { min-width: 0; }
+  .msg .meta { display: flex; align-items: baseline; gap: 8px; }
+  .msg .name { font-weight: 650; font-size: 13.5px; }
+  .msg .time { font-size: 11px; color: var(--faint); }
+  .msg .text { font-size: 13.5px; color: #d6dae6; margin-top: 2px; line-height: 1.45; }
+  .bot-tag {
+    font-size: 9.5px; font-weight: 700; letter-spacing: .4px;
+    background: var(--accent); color: #fff; padding: 1px 5px; border-radius: 4px;
+    text-transform: uppercase;
+  }
+  .bot-card {
+    margin-top: 6px; border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    background: var(--panel-2); border-radius: 8px; padding: 10px 12px; font-size: 13px;
+  }
+  .bot-card .q { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .pr-link {
+    display: inline-flex; align-items: center; gap: 7px; margin-top: 6px;
+    font-size: 12.5px; color: var(--term-blue); text-decoration: none;
+    background: rgba(96,165,250,.08); border: 1px solid rgba(96,165,250,.25);
+    padding: 5px 10px; border-radius: 7px;
+  }
+  .ok-chip { color: var(--green); font-size: 12px; font-weight: 600; }
+
+  .composer {
+    flex-shrink: 0; padding: 12px 14px; border-top: 1px solid var(--border);
+    display: flex; gap: 10px; align-items: center;
+  }
+  .composer input {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 9px; padding: 10px 13px; color: var(--text); font-size: 13.5px;
+    font-family: var(--sans); outline: none;
+  }
+  .composer input:focus { border-color: var(--accent); }
+  .send-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 9px;
+    padding: 10px 16px; font-weight: 600; font-size: 13px; cursor: pointer;
+  }
+  .send-btn:hover { filter: brightness(1.08); }
+
+  /* ---------- Terminal ---------- */
+  .term-head { background: var(--term-bg); }
+  .traffic { display: flex; gap: 7px; }
+  .traffic i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .traffic .r { background: #ff5f56; }
+  .traffic .y { background: #ffbd2e; }
+  .traffic .g { background: #27c93f; }
+  .term-body {
+    flex: 1; overflow-y: auto; background: var(--term-bg);
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.7;
+    padding: 12px 16px; color: #c7cddb;
+  }
+  .term-body .ln { white-space: pre-wrap; word-break: break-word; }
+  .t-prompt { color: var(--accent); }
+  .t-green { color: var(--term-green); }
+  .t-blue { color: var(--term-blue); }
+  .t-gray { color: var(--term-gray); }
+  .t-amber { color: var(--amber); }
+  .cursor { display:inline-block; width:8px; height:15px; background:var(--term-green);
+            vertical-align:-2px; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ---------- Report ---------- */
+  .report-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
+  .report-title { font-size: 15px; font-weight: 700; margin-bottom: 3px; }
+  .report-sub { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+  .r-row { display: flex; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .r-row .k { color: var(--muted); width: 120px; flex-shrink: 0; }
+  .r-row .v { color: var(--text); }
+  .files li { font-family: var(--mono); font-size: 12px; color: #cbd2e2; list-style: none;
+              padding: 3px 0; display: flex; gap: 8px; align-items: center; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 700; }
+  .b-add { background: rgba(52,211,153,.15); color: var(--green); }
+  .b-mod { background: rgba(251,191,36,.15); color: var(--amber); }
+  .store-bar {
+    flex-shrink: 0; border-top: 1px solid var(--border);
+    padding: 11px 16px; display: flex; align-items: center; gap: 10px;
+    font-size: 12.5px; color: var(--muted);
+    background: rgba(52,211,153,0.04);
+  }
+  .store-bar .check {
+    width: 18px; height: 18px; border-radius: 50%; background: var(--green);
+    color: #06281c; display: grid; place-items: center; font-size: 12px; font-weight: 900;
+  }
+  .store-bar code { font-family: var(--mono); color: var(--faint); font-size: 11.5px; }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: #2b3147; border-radius: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="logo">B</div>
+    <div class="brand">
+      <b>Company Brain OS</b>
+      <span>Engineering Agent</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="pill"><span class="dot"></span> Listener live · <span id="pillChannel">#all-new-workspace</span></div>
+    <div class="pill">Groq · llama-3.3-70b</div>
+  </div>
+
+  <!-- Main layout -->
+  <div class="layout">
+
+    <!-- LEFT: Slack chat -->
+    <div class="card">
+      <div class="card-head">
+        <div class="chan-icon">#</div>
+        <div>
+          <div class="title" id="chanTitle">test-channel</div>
+          <div class="sub" id="chanSub">agent watching for consensus</div>
+        </div>
+        <div class="right" style="display:flex; align-items:center; gap:8px;">
+          <div class="mode-toggle">
+            <button id="modeLocal" class="mode-btn active" onclick="setMode('local')">Local test</button>
+            <button id="modeSlack" class="mode-btn" onclick="setMode('slack')">Slack</button>
+          </div>
+          <select id="identitySelect" class="chan-select" title="You are">
+            <option value="User 1">You: User 1</option>
+            <option value="User 2">You: User 2</option>
+            <option value="User 3">You: User 3</option>
+          </select>
+          <select id="channelSelect" class="chan-select" title="Switch channel" style="display:none">
+            <option value="">Loading channels…</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="messages" id="messages">
+        <div class="msg">
+          <div class="avatar a1">A</div>
+          <div class="body">
+            <div class="meta"><span class="name">Aryan</span><span class="time">10:24</span></div>
+            <div class="text">we should add a /status endpoint that returns {"status":"ok"} so uptime checks have something to hit</div>
+          </div>
+        </div>
+
+        <div class="msg">
+          <div class="avatar a2">M</div>
+          <div class="body">
+            <div class="meta"><span class="name">Maya</span><span class="time">10:24</span></div>
+            <div class="text">yeah good idea. JSON, 200 response. let's do it</div>
+          </div>
+        </div>
+
+        <div class="msg">
+          <div class="avatar a1">A</div>
+          <div class="body">
+            <div class="meta"><span class="name">Aryan</span><span class="time">10:25</span></div>
+            <div class="text">agreed, ship it 🚀</div>
+          </div>
+        </div>
+
+        <div class="msg">
+          <div class="avatar abot">B</div>
+          <div class="body">
+            <div class="meta"><span class="name">Brain OS Agent</span><span class="bot-tag">app</span><span class="time">10:25</span></div>
+            <div class="bot-card">
+              <div class="q">🤖 Consensus detected — Aryan and Maya agreed. Implementing now:</div>
+              <b>Add a /status endpoint that returns {"status":"ok"} as JSON</b>
+            </div>
+          </div>
+        </div>
+
+        <div class="msg">
+          <div class="avatar abot">B</div>
+          <div class="body">
+            <div class="meta"><span class="name">Brain OS Agent</span><span class="bot-tag">app</span><span class="time">10:25</span></div>
+            <div class="text"><span class="ok-chip">✓ Done</span> — opened a PR with the change, reviewed and verified.</div>
+            <a class="pr-link" href="#">🔗 github.com/rexm5402/agent-sandbox/pull/8</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <input id="chatInput" placeholder="Message #all-new-workspace" />
+        <button class="send-btn" onclick="sendMsg()">Send</button>
+      </div>
+    </div>
+
+    <!-- RIGHT column -->
+    <div class="col-right">
+
+      <!-- Terminal -->
+      <div class="card">
+        <div class="card-head term-head">
+          <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+          <div class="title" style="margin-left:6px">agent — listener logs</div>
+          <div class="right sub">run 0d06cadd</div>
+        </div>
+        <div class="term-body" id="term">
+<div class="ln"><span class="t-gray">$</span> <span class="t-prompt">python -m app.slack.listener "#all-new-workspace"</span></div>
+<div class="ln"><span class="t-gray">[listener]</span> watching #all-new-workspace (C0BDG4QDE1H) as @brain_os_agent</div>
+<div class="ln"><span class="t-gray">[listener]</span> <span class="t-blue">consensus.ready=True</span> :: Aryan and Maya both agreed to build it</div>
+<div class="ln"><span class="t-gray">[listener]</span> running agent for task: <span class="t-amber">'Add a /status endpoint returning {status: ok}'</span></div>
+<div class="ln"><span class="t-green">[step 1]</span> list_repo_files        <span class="t-green">success</span>  401ms</div>
+<div class="ln"><span class="t-green">[step 2]</span> get_file_contents      <span class="t-green">success</span>  330ms</div>
+<div class="ln"><span class="t-green">[step 3]</span> self_review_code       <span class="t-green">success</span>  612ms  <span class="t-gray">(1 file reviewed, 1 changed)</span></div>
+<div class="ln"><span class="t-green">[step 3]</span> open_pull_request      <span class="t-green">success</span>  3543ms</div>
+<div class="ln"><span class="t-green">[step 3]</span> post_slack_message     <span class="t-green">success</span>  308ms</div>
+<div class="ln"><span class="t-gray">[listener]</span> PR opened: <span class="t-blue">https://github.com/rexm5402/agent-sandbox/pull/8</span></div>
+<div class="ln"><span class="cursor"></span></div>
+        </div>
+      </div>
+
+      <!-- Report -->
+      <div class="card">
+        <div class="card-head">
+          <div class="title">📋 Generated Report</div>
+          <div class="right sub" id="reportRun">no run yet</div>
+        </div>
+        <div class="report-body" id="report">
+          <div class="report-title">Add /status endpoint</div>
+          <div class="report-sub">Triggered by consensus between Aryan & Maya in #all-new-workspace</div>
+
+          <div class="r-row"><div class="k">Task</div><div class="v">Add a /status endpoint returning {"status":"ok"} as JSON</div></div>
+          <div class="r-row"><div class="k">Pull request</div><div class="v"><a class="pr-link" href="#" style="margin:0">#8 · agent/add-status-endpoint</a></div></div>
+          <div class="r-row"><div class="k">Steps</div><div class="v">5 tool calls · 0 errors · 5.2s total</div></div>
+          <div class="r-row"><div class="k">Self-review</div><div class="v"><span class="ok-chip">✓</span> 1 bug fixed before PR</div></div>
+          <div class="r-row" style="border:none"><div class="k">Files changed</div>
+            <div class="v"><ul class="files">
+              <li><span class="badge b-add">ADD</span> app/routes/status.py <span class="t-gray">+12 −0</span></li>
+              <li><span class="badge b-mod">MOD</span> app/main.py <span class="t-gray">+2 −0</span></li>
+            </ul></div>
+          </div>
+        </div>
+        <div class="store-bar" id="storeBar">
+          <div class="check">✓</div>
+          Report stored to backend
+          <code>POST /runs · audit_log + runs (Postgres)</code>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+<script>
+  // --- live wiring to the FastAPI backend (same origin) ---
+  const messages = document.getElementById('messages');
+  const term = document.getElementById('term');
+  const report = document.getElementById('report');
+  const reportRun = document.getElementById('reportRun');
+  const storeBar = document.getElementById('storeBar');
+
+  function scroll(el){ el.scrollTop = el.scrollHeight; }
+  scroll(messages); scroll(term);
+  storeBar.style.display = 'none';
+
+  function esc(s){
+    return (s ?? '').toString()
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+  function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }
+
+  function addMsg(name, cls, text){
+    const wrap = document.createElement('div');
+    wrap.className = 'msg';
+    wrap.innerHTML =
+      '<div class="avatar '+cls+'">'+esc(name[0].toUpperCase())+'</div>'+
+      '<div class="body"><div class="meta"><span class="name">'+esc(name)+'</span>'+
+      '<span class="time">'+now()+'</span></div><div class="text">'+esc(text)+'</div></div>';
+    messages.appendChild(wrap); scroll(messages);
+  }
+  function botMsg(text, prUrl){
+    const wrap = document.createElement('div');
+    wrap.className = 'msg';
+    let inner = '<div class="avatar abot">B</div><div class="body">'+
+      '<div class="meta"><span class="name">Brain OS Agent</span>'+
+      '<span class="bot-tag">app</span><span class="time">'+now()+'</span></div>'+
+      '<div class="text">'+text+'</div>';
+    if(prUrl){
+      inner += '<a class="pr-link" href="'+esc(prUrl)+'" target="_blank">🔗 '+
+        esc(prUrl.replace('https://github.com/','')) +'</a>';
+    }
+    inner += '</div>';
+    wrap.innerHTML = inner;
+    messages.appendChild(wrap); scroll(messages);
+  }
+
+  function termLines(lines){ term.innerHTML = lines.join('\n'); scroll(term); }
+  function L(html){ return '<div class="ln">'+html+'</div>'; }
+
+  function renderTerminal(data){
+    const lines = [
+      L('<span class="t-gray">$</span> <span class="t-prompt">POST /runs</span> '+esc(JSON.stringify({task:data.task}))),
+      L('<span class="t-gray">[run]</span> '+esc(data.run_id)),
+      L('<span class="t-gray">[status]</span> <span class="'+(data.status==='error'?'t-amber':'t-blue')+'">'+esc(data.status)+'</span>')
+    ];
+    (data.steps||[]).forEach(s => {
+      const cls = s.status==='success' ? 't-green' : (s.status==='error' ? 't-amber' : 't-gray');
+      const lat = s.latency_ms!=null ? (s.latency_ms+'ms') : '';
+      let extra = '';
+      if(s.tool==='self_review_code' && s.output && s.output.changed_paths){
+        extra = ' <span class="t-gray">('+s.output.reviewed+' reviewed, '+s.output.changed_paths.length+' changed)</span>';
+      }
+      lines.push(L('<span class="'+cls+'">[step '+s.step+']</span> '+
+        '<span style="display:inline-block;min-width:170px">'+esc(s.tool)+'</span> '+
+        '<span class="'+cls+'">'+esc(s.status)+'</span>  <span class="t-gray">'+lat+'</span>'+extra));
+    });
+    if(data.status==='running'){ lines.push(L('<span class="cursor"></span>')); }
+    else if(data.pr_url){ lines.push(L('<span class="t-gray">[done]</span> PR: <span class="t-blue">'+esc(data.pr_url)+'</span>')); }
+    termLines(lines);
+  }
+
+  function row(k,v){ return '<div class="r-row"><div class="k">'+k+'</div><div class="v">'+v+'</div></div>'; }
+
+  function renderReport(data){
+    reportRun.textContent = 'run '+data.run_id.slice(0,8)+' · '+now();
+    const steps = data.steps||[];
+    const errors = steps.filter(s => s.status==='error').length;
+    const totalMs = steps.reduce((a,s)=>a+(s.latency_ms||0),0);
+    const reviewStep = steps.find(s => s.tool==='self_review_code');
+    const prStep = steps.find(s => s.tool==='open_pull_request' && s.output);
+    const files = (prStep && prStep.output && prStep.output.files_changed) || [];
+
+    let html = '<div class="report-title">'+esc(data.task.slice(0,80))+'</div>'+
+      '<div class="report-sub">Triggered from dashboard · '+esc(data.status)+'</div>'+
+      row('Task', esc(data.task));
+    if(data.pr_url){
+      html += row('Pull request','<a class="pr-link" style="margin:0" target="_blank" href="'+esc(data.pr_url)+'">'+esc(data.pr_url.replace('https://github.com/',''))+'</a>');
+    } else {
+      html += row('Result', esc(data.final_text||'no PR produced'));
+    }
+    html += row('Steps', steps.length+' tool calls · '+errors+' errors · '+(totalMs/1000).toFixed(1)+'s');
+    if(reviewStep && reviewStep.output){
+      const ch = (reviewStep.output.changed_paths||[]).length;
+      html += row('Self-review', ch>0 ? '<span class="ok-chip">✓</span> '+ch+' file(s) fixed before PR' : '<span class="ok-chip">✓</span> no bugs found');
+    }
+    if(files.length){
+      html += '<div class="r-row" style="border:none"><div class="k">Files changed</div><div class="v"><ul class="files">'+
+        files.map(f=>'<li><span class="badge b-mod">FILE</span> '+esc(f)+'</li>').join('')+'</ul></div></div>';
+    }
+    report.innerHTML = html;
+    storeBar.style.display = (data.status!=='running') ? 'flex' : 'none';
+  }
+
+  // --- live Slack mirror ---------------------------------------------
+  // Clean Slack mrkdwn into plain text: <@ID>, <url|label>, <url>, &amp; etc.
+  function deMrkdwn(s){
+    return (s||'')
+      .replace(/<@([A-Z0-9]+)>/g, '@$1')
+      .replace(/<([^|>]+)\|([^>]+)>/g, '$2')
+      .replace(/<(https?:[^>]+)>/g, '$1')
+      .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+  }
+  // Deterministic avatar colour class per distinct user.
+  const avatarClasses = ['a1','a2','a3','a4'];
+  const userClass = {};
+  function classFor(uid){
+    if(!(uid in userClass)){
+      userClass[uid] = avatarClasses[Object.keys(userClass).length % avatarClasses.length];
+    }
+    return userClass[uid];
+  }
+
+  function renderMessage(m){
+    const wrap = document.createElement('div');
+    wrap.className = 'msg';
+    const text = deMrkdwn(m.text);
+    if(m.is_bot){
+      let prUrl = m.pr_url || (text.match(/https?:\/\/github\.com\/\S+/)||[])[0] || '';
+      let body = esc(text).replace(/https?:\/\/github\.com\/\S+/, '').trim();
+      let inner = '<div class="avatar abot">B</div><div class="body">'+
+        '<div class="meta"><span class="name">'+esc(m.name)+'</span>'+
+        '<span class="bot-tag">app</span><span class="time">'+fmtTs(m.ts)+'</span></div>'+
+        '<div class="text">'+body+'</div>';
+      if(prUrl){
+        inner += '<a class="pr-link" href="'+esc(prUrl)+'" target="_blank">🔗 '+
+          esc(prUrl.replace('https://github.com/','')) +'</a>';
+      }
+      wrap.innerHTML = inner + '</div>';
+    } else {
+      wrap.innerHTML =
+        '<div class="avatar '+classFor(m.user_id)+'">'+esc((m.name[0]||'?').toUpperCase())+'</div>'+
+        '<div class="body"><div class="meta"><span class="name">'+esc(m.name)+'</span>'+
+        '<span class="time">'+fmtTs(m.ts)+'</span></div><div class="text">'+esc(text)+'</div></div>';
+    }
+    return wrap;
+  }
+  function fmtTs(ts){
+    const d = new Date(parseFloat(ts)*1000);
+    return isNaN(d) ? '' : d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  }
+
+  // normalize local-chat + slack shapes into one render shape
+  function normalize(m){
+    return {
+      name: m.name || m.user || 'unknown',
+      user_id: m.user_id || m.user || '',
+      text: m.text, is_bot: m.is_bot, ts: m.ts, pr_url: m.pr_url || null
+    };
+  }
+
+  let lastMsgKey = '';
+  async function loadMessages(){
+    try {
+      const url = (mode === 'slack') ? '/slack/messages?limit=50' : '/chat/messages';
+      const r = await fetch(url);
+      if(!r.ok){
+        const detail = (await r.json().catch(()=>({}))).detail || ('HTTP '+r.status);
+        const hint = /not_in_channel/.test(detail)
+          ? 'The bot is not a member of this channel. Invite @brain_os_agent, then it will mirror here.'
+          : esc(detail);
+        if(lastMsgKey !== 'ERR:'+detail){
+          lastMsgKey = 'ERR:'+detail;
+          messages.innerHTML = '<div class="msg"><div class="body"><div class="text" style="color:var(--amber)">⚠️ '+hint+'</div></div></div>';
+        }
+        return;
+      }
+      const data = await r.json();
+      const msgs = (data.messages || []).map(normalize);
+      const key = mode+':'+msgs.map(m=>m.ts).join(',');
+      if(key === lastMsgKey) return;   // nothing new, avoid flicker
+      lastMsgKey = key;
+      messages.innerHTML = '';
+      if(!msgs.length){
+        const empty = (mode==='slack') ? 'No messages yet in this channel.'
+          : 'No messages yet — type as User 1, then open a second window as User 2 and agree to build something.';
+        messages.innerHTML = '<div class="msg"><div class="body"><div class="text" style="color:var(--faint)">'+empty+'</div></div></div>';
+      } else {
+        msgs.forEach(m => messages.appendChild(renderMessage(m)));
+      }
+      scroll(messages);
+    } catch(e){ /* keep polling */ }
+  }
+
+  async function sendMsg(){
+    const input = document.getElementById('chatInput');
+    const v = input.value.trim();
+    if(!v) return;
+    input.value = '';
+    try {
+      if(mode === 'slack'){
+        await fetch('/slack/send', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({text: v})});
+      } else {
+        await fetch('/chat/send', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({user: identity(), text: v})});
+      }
+      lastMsgKey = '';        // force refresh so the new message shows
+      loadMessages();
+    } catch(e){
+      addMsg('System','a1','⚠️ could not send: '+esc(e.message));
+    }
+  }
+  document.getElementById('chatInput').addEventListener('keydown', e => {
+    if(e.key === 'Enter') sendMsg();
+  });
+
+  // --- reflect real agent runs on the right side ---------------------
+  let lastRunId = null;
+  let runPoll = null;
+  async function pollLatestRun(){
+    try {
+      const r = await fetch('/runs');
+      const runs = await r.json();
+      if(!runs.length) return;
+      const latest = runs[0];
+      if(latest.run_id === lastRunId && !runPoll) return;
+      if(latest.run_id !== lastRunId){
+        lastRunId = latest.run_id;
+        trackRun(latest.run_id);
+      }
+    } catch(e){ /* keep polling */ }
+  }
+  function trackRun(run_id){
+    if(runPoll) clearInterval(runPoll);
+    runPoll = setInterval(async () => {
+      try {
+        const r = await fetch('/runs/'+run_id);
+        const data = await r.json();
+        renderTerminal(data);
+        if(data.status !== 'running'){
+          clearInterval(runPoll); runPoll = null;
+          renderReport(data);
+        }
+      } catch(e){ /* keep polling */ }
+    }, 1300);
+  }
+
+  // --- mode + identity ---
+  let mode = 'local';   // 'local' | 'slack'
+  const channelSelect = document.getElementById('channelSelect');
+  const identitySelect = document.getElementById('identitySelect');
+  const chanTitle = document.getElementById('chanTitle');
+  const chanSub = document.getElementById('chanSub');
+  const pillChannel = document.getElementById('pillChannel');
+  const chatInput = document.getElementById('chatInput');
+
+  function identity(){ return identitySelect.value || 'User 1'; }
+
+  // identity can be preset via ?as=  (e.g. open one window as User 1, another as User 2)
+  const asParam = new URLSearchParams(location.search).get('as');
+  if(asParam){
+    let opt = [...identitySelect.options].find(o => o.value.toLowerCase() === asParam.toLowerCase());
+    if(!opt){ opt = new Option('You: '+asParam, asParam); identitySelect.add(opt); }
+    identitySelect.value = opt.value;
+  }
+  identitySelect.addEventListener('change', () => {
+    chatInput.placeholder = (mode==='local') ? 'Message as '+identity() : 'Message #'+chanTitle.textContent;
+  });
+
+  function setMode(m){
+    mode = m;
+    document.getElementById('modeLocal').classList.toggle('active', m==='local');
+    document.getElementById('modeSlack').classList.toggle('active', m==='slack');
+    identitySelect.style.display = (m==='local') ? '' : 'none';
+    channelSelect.style.display  = (m==='slack') ? '' : 'none';
+    if(m==='local'){
+      chanTitle.textContent = 'test-channel';
+      pillChannel.textContent = '#test-channel (local)';
+      chanSub.textContent = 'in-app test · agent watching for consensus';
+      chatInput.placeholder = 'Message as '+identity();
+    } else {
+      chanSub.textContent = 'live Slack mirror · agent watching for consensus';
+      if(channelSelect.value) applyChannel(channelSelect.value);
+      else { chatInput.placeholder = 'Message #'+chanTitle.textContent; }
+      loadChannels();
+    }
+    lastMsgKey = '';
+    loadMessages();
+  }
+  window.setMode = setMode;
+
+  function applyChannel(name){
+    const clean = name.replace(/^#/, '');
+    chanTitle.textContent = clean;
+    pillChannel.textContent = '#'+clean;
+    chatInput.placeholder = 'Message #'+clean;
+  }
+
+  async function loadChannels(){
+    try {
+      const r = await fetch('/slack/channels');
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const data = await r.json();
+      const active = (data.active||'').replace(/^#/, '');
+      channelSelect.innerHTML = '';
+      (data.channels||[]).forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.name;
+        opt.textContent = '#'+c.name + (c.is_member ? '' : ' (not joined)');
+        if(c.name === active) opt.selected = true;
+        channelSelect.appendChild(opt);
+      });
+      if(channelSelect.value) applyChannel(channelSelect.value);
+    } catch(e){
+      channelSelect.innerHTML = '<option value="">Slack unavailable</option>';
+    }
+  }
+
+  channelSelect.addEventListener('change', async () => {
+    const name = channelSelect.value;
+    if(!name) return;
+    applyChannel(name);
+    try {
+      await fetch('/slack/channel', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({channel: '#'+name})
+      });
+      lastMsgKey = '';      // force reload for the new channel
+      loadMessages();
+    } catch(e){ /* display already updated */ }
+  });
+
+  // --- boot ---
+  setMode('local');     // default to the local test channel
+  pollLatestRun();
+  setInterval(loadMessages, 3000);
+  setInterval(pollLatestRun, 2500);
+</script>
+</body>
+</html>

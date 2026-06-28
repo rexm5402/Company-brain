@@ -20,6 +20,9 @@ class SlackError(RuntimeError):
 
 
 class SlackClient:
+    # Shared across instances so name lookups are cached for the process.
+    _name_cache: dict[str, str] = {}
+
     def __init__(self, token: Optional[str] = None) -> None:
         self._token = token or get_settings().slack_bot_token
         self._headers = {"Authorization": f"Bearer {self._token}"}
@@ -45,6 +48,28 @@ class SlackClient:
     def whoami(self) -> dict[str, Any]:
         return self._get("auth.test", {})
 
+    def list_channels(self) -> list[dict[str, Any]]:
+        """Return public channels as [{id, name, is_member}], name-sorted."""
+        channels: list[dict[str, Any]] = []
+        cursor: Optional[str] = None
+        while True:
+            params: dict[str, Any] = {"types": "public_channel", "limit": 200}
+            if cursor:
+                params["cursor"] = cursor
+            body = self._get("conversations.list", params)
+            for ch in body.get("channels", []):
+                channels.append(
+                    {
+                        "id": ch.get("id"),
+                        "name": ch.get("name"),
+                        "is_member": bool(ch.get("is_member")),
+                    }
+                )
+            cursor = body.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+        return sorted(channels, key=lambda c: c.get("name") or "")
+
     def resolve_channel(self, name_or_id: str) -> str:
         """Accept a channel ID (C…/G…) or a #name and return the channel ID."""
         target = name_or_id.lstrip("#")
@@ -66,6 +91,31 @@ class SlackClient:
             if not cursor:
                 break
         raise SlackError(f"channel not found: {name_or_id}")
+
+    def user_name(self, user_id: str) -> str:
+        """Resolve a user ID to a display name, cached.
+
+        Needs the `users:read` scope. If it's missing (or any other error), we
+        fall back to a short label so the UI still renders something stable.
+        """
+        if not user_id:
+            return "unknown"
+        if user_id in self._name_cache:
+            return self._name_cache[user_id]
+        try:
+            body = self._get("users.info", {"user": user_id})
+            user = body.get("user", {})
+            profile = user.get("profile", {})
+            name = (
+                profile.get("display_name")
+                or profile.get("real_name")
+                or user.get("name")
+                or f"User {user_id[-4:]}"
+            )
+        except SlackError:
+            name = f"User {user_id[-4:]}"
+        self._name_cache[user_id] = name
+        return name
 
     def history(
         self, channel: str, *, oldest: Optional[str] = None, limit: int = 50

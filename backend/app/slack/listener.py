@@ -17,8 +17,8 @@ import time
 from typing import Any
 
 from app.agent.llm import LLMClient
-from app.agent.loop import run_agent
 from app.config import get_settings
+from app.runs import service as runs_service
 from app.slack.client import SlackClient, SlackError
 from app.slack.detector import detect_consensus
 
@@ -112,7 +112,7 @@ def _handle_consensus(
         thread_ts=thread_ts,
     )
     print(f"[listener] running agent for task: {consensus.task!r}")
-    run = run_agent(consensus.task)
+    run = runs_service.run_sync(consensus.task)
 
     if run.pr_url:
         slack.post(

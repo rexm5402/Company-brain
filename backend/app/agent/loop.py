@@ -29,8 +29,10 @@ class AgentRun:
     transcript: list[dict[str, Any]] = field(default_factory=list)
 
 
-def run_agent(task: str, *, max_steps: int = MAX_STEPS) -> AgentRun:
-    run_id = uuid.uuid4()
+def run_agent(
+    task: str, *, run_id: uuid.UUID | None = None, max_steps: int = MAX_STEPS
+) -> AgentRun:
+    run_id = run_id or uuid.uuid4()
     llm = LLMClient()
     ctx = RunContext()
     registry = build_registry(ctx)
