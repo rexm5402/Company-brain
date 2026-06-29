@@ -121,6 +121,14 @@ def _handle_consensus(
             thread_ts=thread_ts,
         )
         print(f"[listener] PR opened: {run.pr_url}")
+        runs_service.watch_ci(
+            run.run_id,
+            run.pr_url,
+            after_step=run.steps,
+            on_result=lambda summary: slack.post(
+                channel_id, _ci_slack_message(summary), thread_ts=thread_ts
+            ),
+        )
     else:
         detail = run.final_text or "no PR produced"
         slack.post(
@@ -129,6 +137,25 @@ def _handle_consensus(
             thread_ts=thread_ts,
         )
         print(f"[listener] no PR. final_text={run.final_text!r}")
+
+
+def _ci_slack_message(summary: dict) -> str:
+    state = summary.get("state")
+    if state == "success":
+        return f":white_check_mark: CI passed — all {summary.get('total', 0)} check(s) green."
+    if state == "failure":
+        failed = [
+            c["name"]
+            for c in summary.get("checks", [])
+            if c.get("conclusion") not in ("success", "neutral", "skipped", None)
+        ]
+        detail = ", ".join(failed) or "see the PR checks"
+        return f":x: CI failed — {detail}. The change needs a fix before merge."
+    if state == "pending":
+        return ":hourglass_flowing_sand: CI still running — check the PR for status."
+    if state == "unknown":
+        return ":warning: Couldn't read CI status (token lacks the Checks permission)."
+    return ":information_source: No CI configured on this repo yet."
 
 
 if __name__ == "__main__":

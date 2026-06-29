@@ -401,6 +401,76 @@ class OpenPullRequestTool(_GitHubTool):
         return r.json()
 
 
+class GetPRChecksTool(_GitHubTool):
+    name = "get_pr_checks"
+    description = (
+        "Get the CI/CD status (GitHub Actions workflow runs) for a pull request "
+        "by number. Returns an overall state of 'success', 'failure', 'pending', "
+        "or 'none' (no workflows configured), plus per-workflow details including "
+        "the failing workflow name. Use this after opening a PR to see if the "
+        "build/tests passed."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "pr_number": {"type": "integer", "description": "The pull request number."},
+        },
+        "required": ["pr_number"],
+    }
+
+    def run(self, **kwargs: Any) -> ToolResult:
+        pr_number = kwargs["pr_number"]
+        if not self._repo:
+            return ToolResult(success=False, error="GITHUB_REPO is not configured.")
+        try:
+            with self._client() as client:
+                pr = client.get(f"{_API}/repos/{self._repo}/pulls/{pr_number}")
+                pr.raise_for_status()
+                head_sha = pr.json()["head"]["sha"]
+                wr = client.get(
+                    f"{_API}/repos/{self._repo}/actions/runs",
+                    params={"head_sha": head_sha},
+                )
+                wr.raise_for_status()
+                runs = wr.json().get("workflow_runs", [])
+        except httpx.HTTPStatusError as exc:
+            return ToolResult(
+                success=False,
+                error=f"GitHub API {exc.response.status_code}: {exc.response.text[:500]}",
+            )
+
+        checks = [
+            {
+                "name": c.get("name"),
+                "status": c.get("status"),  # queued | in_progress | completed
+                "conclusion": c.get("conclusion"),  # success | failure | ... | None
+                "url": c.get("html_url"),
+            }
+            for c in runs
+        ]
+        state = self._overall_state(checks)
+        return ToolResult(
+            success=True,
+            output={
+                "pr_number": pr_number,
+                "head_sha": head_sha,
+                "state": state,
+                "total": len(checks),
+                "checks": checks,
+            },
+        )
+
+    @staticmethod
+    def _overall_state(checks: list[dict[str, Any]]) -> str:
+        if not checks:
+            return "none"
+        if any(c["status"] != "completed" for c in checks):
+            return "pending"
+        if any(c["conclusion"] not in ("success", "neutral", "skipped") for c in checks):
+            return "failure"
+        return "success"
+
+
 class CommentOnPRTool(_GitHubTool):
     name = "comment_on_pr"
     description = "Post a comment on an existing pull request (by PR number)."

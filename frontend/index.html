@@ -439,6 +439,11 @@
       if(s.tool==='self_review_code' && s.output && s.output.changed_paths){
         extra = ' <span class="t-gray">('+s.output.reviewed+' reviewed, '+s.output.changed_paths.length+' changed)</span>';
       }
+      if(s.tool==='ci_check' && s.output){
+        const st = s.output.state;
+        const c = st==='success' ? 't-green' : ((st==='failure'||st==='unknown') ? 't-amber' : 't-gray');
+        extra = ' <span class="'+c+'">CI '+esc(st)+'</span> <span class="t-gray">('+(s.output.total||0)+' check'+((s.output.total!==1)?'s':'')+')</span>';
+      }
       lines.push(L('<span class="'+cls+'">[step '+s.step+']</span> '+
         '<span style="display:inline-block;min-width:170px">'+esc(s.tool)+'</span> '+
         '<span class="'+cls+'">'+esc(s.status)+'</span>  <span class="t-gray">'+lat+'</span>'+extra));
@@ -471,6 +476,20 @@
     if(reviewStep && reviewStep.output){
       const ch = (reviewStep.output.changed_paths||[]).length;
       html += row('Self-review', ch>0 ? '<span class="ok-chip">✓</span> '+ch+' file(s) fixed before PR' : '<span class="ok-chip">✓</span> no bugs found');
+    }
+    const ciStep = steps.find(s => s.tool==='ci_check' && s.output);
+    if(data.pr_url){
+      let ciVal;
+      if(!ciStep){ ciVal = '<span class="t-gray">⏳ running…</span>'; }
+      else {
+        const st = ciStep.output.state, n = ciStep.output.total||0;
+        if(st==='success') ciVal = '<span class="ok-chip">✓</span> passed · '+n+' check'+(n!==1?'s':'')+' green';
+        else if(st==='failure') ciVal = '<span style="color:var(--red)">✗ failed</span> · needs a fix before merge';
+        else if(st==='pending') ciVal = '<span class="t-gray">⏳ still running</span>';
+        else if(st==='unknown') ciVal = '<span style="color:var(--amber)">⚠ token lacks Checks permission</span>';
+        else ciVal = '<span class="t-gray">no CI configured on repo</span>';
+      }
+      html += row('CI / build', ciVal);
     }
     if(files.length){
       html += '<div class="r-row" style="border:none"><div class="k">Files changed</div><div class="v"><ul class="files">'+
@@ -611,14 +630,21 @@
   }
   function trackRun(run_id){
     if(runPoll) clearInterval(runPoll);
+    let ciDeadline = null;   // once run is done, keep polling until CI lands
     runPoll = setInterval(async () => {
       try {
         const r = await fetch('/runs/'+run_id);
         const data = await r.json();
         renderTerminal(data);
+        const ciDone = (data.steps||[]).some(s => s.tool==='ci_check');
+        const hasPr = !!data.pr_url;
         if(data.status !== 'running'){
-          clearInterval(runPoll); runPoll = null;
           renderReport(data);
+          // Run finished, but CI is watched afterward — keep polling briefly so
+          // the report updates from "running…" to the real CI verdict.
+          if(!hasPr || ciDone){ clearInterval(runPoll); runPoll = null; return; }
+          if(ciDeadline === null){ ciDeadline = Date.now() + 260000; }
+          if(Date.now() > ciDeadline){ clearInterval(runPoll); runPoll = null; }
         }
       } catch(e){ /* keep polling */ }
     }, 1300);

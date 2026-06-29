@@ -8,15 +8,28 @@ while it's in flight.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
-from typing import Any
+from typing import Any, Callable, Optional
 
 from sqlalchemy import select
 
 from app.agent.loop import run_agent
 from app.audit.models import AuditLog
+from app.audit.recorder import ToolResult, record_tool_call
 from app.db import SessionLocal
 from app.runs.models import RunRecord
+from app.tools.context import RunContext
+from app.tools.github_tool import GetPRChecksTool
+
+# CI polling: how long to wait for GitHub Actions to finish before giving up.
+_CI_POLL_SECONDS = 8
+_CI_MAX_WAIT_SECONDS = 240
+# Right after a PR opens, GitHub takes a few seconds to register the workflow
+# run, so the first poll legitimately sees zero runs (state "none"). Keep
+# waiting for a run to appear during this grace window before concluding that
+# the repo has no CI configured.
+_CI_NONE_GRACE_SECONDS = 45
 
 
 def create_run(task: str) -> uuid.UUID:
@@ -66,12 +79,105 @@ def _execute(run_id: uuid.UUID, task: str) -> None:
             final_text=result.final_text,
             steps=result.steps,
         )
+        if result.pr_url:  # surface CI status on the dashboard report
+            watch_ci(run_id, result.pr_url, after_step=result.steps)
     except Exception as exc:  # noqa: BLE001 - record any failure for the UI
         _update(
             run_id,
             status="error",
             final_text=f"{type(exc).__name__}: {exc}",
         )
+
+
+# --- CI watcher --------------------------------------------------------
+def _pr_number_from_url(pr_url: str) -> Optional[int]:
+    try:
+        return int(pr_url.rstrip("/").rsplit("/", 1)[-1])
+    except (ValueError, AttributeError):
+        return None
+
+
+def watch_ci(
+    run_id: uuid.UUID,
+    pr_url: str,
+    *,
+    after_step: int = 0,
+    on_result: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> None:
+    """Poll a PR's GitHub Actions checks in the background.
+
+    Records a single `ci_check` audit step (so the dashboard report/terminal
+    show pass/fail) once checks settle, and optionally calls `on_result` with
+    the summary (used to post the verdict back into a chat/Slack channel).
+    Non-blocking: spawns a daemon thread.
+    """
+    pr_number = _pr_number_from_url(pr_url)
+    if pr_number is None:
+        return
+    threading.Thread(
+        target=_watch_ci,
+        args=(run_id, pr_number, after_step + 1, on_result),
+        daemon=True,
+    ).start()
+
+
+def _watch_ci(
+    run_id: uuid.UUID,
+    pr_number: int,
+    step: int,
+    on_result: Optional[Callable[[dict[str, Any]], None]],
+) -> None:
+    tool = GetPRChecksTool(RunContext())
+    started = time.monotonic()
+    deadline = started + _CI_MAX_WAIT_SECONDS
+    summary: dict[str, Any] = {"pr_number": pr_number, "state": "none"}
+    fail_streak = 0
+
+    while time.monotonic() < deadline:
+        result = tool.run(pr_number=pr_number)
+        if result.success and result.output:
+            fail_streak = 0
+            summary = result.output
+            state = summary.get("state")
+            # "pending" -> still running. "none" right after open -> the run
+            # likely hasn't registered yet; keep waiting through the grace
+            # window. Any other state (success/failure) is terminal.
+            waiting = state == "pending" or (
+                state == "none"
+                and time.monotonic() - started < _CI_NONE_GRACE_SECONDS
+            )
+            if not waiting:
+                break
+        else:
+            # A 403 (missing Checks permission) is permanent — don't spin for
+            # the full timeout. Give a few tries in case the PR head is briefly
+            # not ready, then report that CI couldn't be read.
+            fail_streak += 1
+            if fail_streak >= 3:
+                summary = {
+                    "pr_number": pr_number,
+                    "state": "unknown",
+                    "error": result.error,
+                }
+                break
+        time.sleep(_CI_POLL_SECONDS)
+
+    # Record one audit step so the report/terminal reflect the final verdict.
+    final_state = summary.get("state")
+    record_tool_call(
+        run_id=run_id,
+        step=step,
+        tool_name="ci_check",
+        tool_input={"pr_number": pr_number},
+        fn=lambda: ToolResult(
+            success=final_state not in ("failure", "unknown"), output=summary
+        ),
+    )
+    if on_result is not None:
+        try:
+            on_result(summary)
+        except Exception:  # noqa: BLE001 - notification must never crash the watcher
+            pass
 
 
 def _update(run_id: uuid.UUID, **fields: Any) -> None:

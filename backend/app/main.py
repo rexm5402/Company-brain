@@ -228,12 +228,40 @@ def _chat_consensus_check() -> None:
             is_bot=True,
             pr_url=run.pr_url,
         )
+        _chat_append("Brain OS Agent", "⏳ Running CI checks…", is_bot=True)
+        runs_service.watch_ci(
+            run.run_id,
+            run.pr_url,
+            after_step=run.steps,
+            on_result=lambda summary: _chat_append(
+                "Brain OS Agent", _ci_message(summary), is_bot=True
+            ),
+        )
     else:
         _chat_append(
             "Brain OS Agent",
             f"⚠️ {run.final_text or 'no PR produced'}",
             is_bot=True,
         )
+
+
+def _ci_message(summary: dict) -> str:
+    state = summary.get("state")
+    if state == "success":
+        return f"✅ CI passed — all {summary.get('total', 0)} check(s) green."
+    if state == "failure":
+        failed = [
+            c["name"]
+            for c in summary.get("checks", [])
+            if c.get("conclusion") not in ("success", "neutral", "skipped", None)
+        ]
+        detail = ", ".join(failed) or "see the PR checks"
+        return f"❌ CI failed — {detail}. The change needs a fix before merge."
+    if state == "pending":
+        return "⏳ CI still running — check the PR for the latest status."
+    if state == "unknown":
+        return "⚠️ Couldn't read CI status (the GitHub token lacks the Checks permission)."
+    return "ℹ️ No CI configured on this repo yet, so the change wasn't verified by tests."
 
 
 @app.post("/runs")

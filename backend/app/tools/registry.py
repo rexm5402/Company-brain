@@ -11,6 +11,7 @@ from app.tools.context import RunContext
 from app.tools.github_tool import (
     CommentOnPRTool,
     GetFileContentsTool,
+    GetPRChecksTool,
     ListRepoFilesTool,
     OpenPullRequestTool,
 )
@@ -23,6 +24,7 @@ def build_registry(ctx: RunContext) -> dict[str, Tool]:
         GetFileContentsTool(ctx),
         OpenPullRequestTool(ctx),
         CommentOnPRTool(ctx),
+        GetPRChecksTool(ctx),
         PostSlackMessageTool(),
     ]
     return {t.name: t for t in tools}
