@@ -15,6 +15,9 @@ from app.db import Base
 
 # Import models so they register on Base.metadata.
 from app.audit import models  # noqa: F401
+from app.runs import models as _runs_models  # noqa: F401
+from app.tickets import models as _tickets_models  # noqa: F401
+from app.reports import models as _reports_models  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().database_url)

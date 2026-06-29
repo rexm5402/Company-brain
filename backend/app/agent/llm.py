@@ -91,8 +91,9 @@ class LLMClient:
             {"type": "function", "function": t} for t in tools
         ]
         # Open models occasionally emit an unparseable tool call (Groq returns
-        # 400 tool_use_failed). It's usually a transient sampling artifact, so
-        # retry a few times before giving up.
+        # 400 tool_use_failed). At a fixed low temperature the retry just
+        # reproduces the same bad output, so escalate the temperature each time
+        # to give the sampler a chance to land a parseable call.
         attempts = 4
         resp = None
         for attempt in range(1, attempts + 1):
@@ -102,7 +103,7 @@ class LLMClient:
                     messages=[{"role": "system", "content": system}, *messages],
                     tools=oai_tools,
                     tool_choice="auto",
-                    temperature=0.2,
+                    temperature=min(0.2 + 0.2 * (attempt - 1), 0.9),
                 )
                 break
             except BadRequestError as exc:

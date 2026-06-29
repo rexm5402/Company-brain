@@ -25,6 +25,11 @@ from app.db import get_session
 from app.runs import service as runs_service
 from app.slack.client import SlackClient, SlackError
 from app.slack.detector import detect_consensus
+from app.ai import assist
+from app.reports import service as reports_service
+from app.tickets import service as tickets_service
+from app.tickets.service import TicketError
+from app.tools.github_tool import get_pr_file_paths, get_pr_state
 
 app = FastAPI(title="Company Brain OS — Engineering Agent", version="0.1.0")
 
@@ -188,6 +193,26 @@ def chat_send(req: ChatSend) -> dict[str, bool]:
     return {"ok": True}
 
 
+_chat_draft_consumed: dict[str, float] = {"ts": 0.0}
+
+
+def _maybe_suggest_ticket(transcript: str, last_ts: float) -> None:
+    """#3 Propose a ticket when the chat surfaces work, at most once per round."""
+    if last_ts <= _chat_draft_consumed["ts"]:
+        return
+    draft = assist.draft_ticket(transcript)
+    if not (draft.should_file and draft.title):
+        return
+    _chat_draft_consumed["ts"] = last_ts
+    desc = f"\n_{draft.description}_" if draft.description else ""
+    _chat_append(
+        "Brain OS Agent",
+        f"🗂️ Sounds like work worth tracking. Want me to file a ticket?\n"
+        f"*{draft.title}*{desc}\n(Create it from the Work Hub.)",
+        is_bot=True,
+    )
+
+
 def _chat_consensus_check() -> None:
     """If two distinct people just agreed, distill a task and run the agent."""
     with _consensus_lock:  # one consensus run at a time
@@ -205,6 +230,9 @@ def _chat_consensus_check() -> None:
         except Exception:  # noqa: BLE001 - detection failure shouldn't crash chat
             return
         if not (consensus.ready and consensus.task):
+            # #3 No agreement yet — but has the discussion surfaced concrete
+            # work? If so, propose filing a ticket (once per new discussion).
+            _maybe_suggest_ticket(transcript, last_ts)
             return
 
         with _chat_lock:
@@ -236,6 +264,9 @@ def _chat_consensus_check() -> None:
             on_result=lambda summary: _chat_append(
                 "Brain OS Agent", _ci_message(summary), is_bot=True
             ),
+            on_progress=lambda text: _chat_append(
+                "Brain OS Agent", text, is_bot=True
+            ),
         )
     else:
         _chat_append(
@@ -262,6 +293,364 @@ def _ci_message(summary: dict) -> str:
     if state == "unknown":
         return "⚠️ Couldn't read CI status (the GitHub token lacks the Checks permission)."
     return "ℹ️ No CI configured on this repo yet, so the change wasn't verified by tests."
+
+
+# --- Tickets ------------------------------------------------------------
+# Our own in-app ticket system. A ticket names an assignee + reporter; the
+# consensus to ship is scoped to exactly those two people (both must agree),
+# which makes "two people agreed" a real authorization signal. Each ticket
+# gets its own discussion channel (in-app for now; real Slack later).
+_ticket_chat_lock = threading.Lock()
+_ticket_messages: dict[str, list[dict]] = {}  # ticket_id -> messages
+_ticket_consumed: dict[str, float] = {}  # ticket_id -> last consumed human ts
+_ticket_questions_asked: dict[str, int] = {}  # ticket_id -> readiness questions asked
+
+# Readiness gate: ask at most this many clarifying questions, then just build
+# with what's known so the agent can't loop forever asking.
+_MAX_READINESS_QUESTIONS = 2
+# If anyone in the channel says one of these, skip the gate and build now.
+_SKIP_QUESTION_PHRASES = (
+    "no further question",
+    "no more question",
+    "no questions",
+    "no other question",
+    "no other thing",
+    "stop asking",
+    "just build",
+    "go ahead and build",
+    "build based on",
+    "build with what",
+)
+
+
+def _wants_to_skip_questions(humans: list[dict]) -> bool:
+    """True if a human explicitly asked the agent to stop asking and build."""
+    for m in humans:
+        text = (m.get("text") or "").lower()
+        if any(phrase in text for phrase in _SKIP_QUESTION_PHRASES):
+            return True
+    return False
+
+
+class TicketCreate(BaseModel):
+    title: str
+    description: str = ""
+    assignee: str
+    reporter: str
+
+
+class TicketChatSend(BaseModel):
+    user: str
+    text: str
+
+
+def _ticket_or_404(ticket_id: str) -> dict:
+    try:
+        rid = uuid.UUID(ticket_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="ticket not found")
+    ticket = tickets_service.get_ticket(rid)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="ticket not found")
+    return ticket
+
+
+@app.post("/tickets")
+def create_ticket(req: TicketCreate) -> dict:
+    try:
+        return tickets_service.create_ticket(
+            req.title, req.description, req.assignee, req.reporter
+        )
+    except TicketError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/tickets")
+def list_tickets() -> list[dict]:
+    return tickets_service.list_tickets()
+
+
+@app.get("/tickets/{ticket_id}")
+def get_ticket(ticket_id: str) -> dict:
+    return _ticket_or_404(ticket_id)
+
+
+@app.post("/tickets/{ticket_id}/start")
+def start_ticket(ticket_id: str) -> dict:
+    _ticket_or_404(ticket_id)
+    try:
+        return tickets_service.open_channel(uuid.UUID(ticket_id))
+    except TicketError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _ticket_chat_append(
+    ticket_id: str, user: str, text: str, *, is_bot: bool, pr_url: str | None = None
+) -> None:
+    with _ticket_chat_lock:
+        _ticket_messages.setdefault(ticket_id, []).append(
+            {
+                "user": user,
+                "text": text,
+                "ts": time.time(),
+                "is_bot": is_bot,
+                "pr_url": pr_url,
+            }
+        )
+
+
+@app.get("/tickets/{ticket_id}/messages")
+def ticket_messages(ticket_id: str) -> dict:
+    _ticket_or_404(ticket_id)
+    with _ticket_chat_lock:
+        return {"messages": list(_ticket_messages.get(ticket_id, []))}
+
+
+@app.post("/tickets/{ticket_id}/send")
+def ticket_send(ticket_id: str, req: TicketChatSend) -> dict[str, bool]:
+    ticket = _ticket_or_404(ticket_id)
+    user = req.user.strip()
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    # Only the assignee or reporter may speak in a ticket channel — this is
+    # what scopes the consensus to the two authorized people.
+    members = {ticket["assignee"].lower(), ticket["reporter"].lower()}
+    if user.lower() not in members:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"only the assignee ({ticket['assignee']}) or reporter "
+                f"({ticket['reporter']}) can post in this ticket"
+            ),
+        )
+    _ticket_chat_append(ticket_id, user, text, is_bot=False)
+    threading.Thread(
+        target=_ticket_consensus_check, args=(ticket_id,), daemon=True
+    ).start()
+    return {"ok": True}
+
+
+def _ticket_consensus_check(ticket_id: str) -> None:
+    """Fire the agent when BOTH the assignee and reporter have agreed."""
+    with _consensus_lock:  # one consensus run at a time (shared with local chat)
+        ticket = tickets_service.get_ticket(uuid.UUID(ticket_id))
+        if ticket is None:
+            return
+        members = {ticket["assignee"], ticket["reporter"]}
+        with _ticket_chat_lock:
+            msgs = _ticket_messages.get(ticket_id, [])
+            humans = [m for m in msgs if not m["is_bot"]]
+            last_ts = humans[-1]["ts"] if humans else 0.0
+            already = _ticket_consumed.get(ticket_id, 0.0)
+        # Both named people must have posted, and there must be something new.
+        posted = {m["user"] for m in humans}
+        both_present = all(
+            any(p.lower() == m.lower() for p in posted) for m in members
+        )
+        if not both_present or last_ts <= already:
+            return
+
+        transcript = "\n".join(f"{m['user']}: {m['text']}" for m in humans[-25:])
+        try:
+            consensus = detect_consensus(transcript, LLMClient())
+        except Exception:  # noqa: BLE001 - detection failure shouldn't crash chat
+            return
+        if not (consensus.ready and consensus.task):
+            return
+
+        # #4 Readiness gate: is the agreed task concrete enough to build? If
+        # not, ask ONE clarifying question and DON'T consume the agreement, so
+        # the team can answer and re-trigger. But cap it: at most
+        # _MAX_READINESS_QUESTIONS, and skip entirely if anyone said "no further
+        # questions" — then build with what's in the ticket/chat. This stops the
+        # agent looping on clarifications forever.
+        with _ticket_chat_lock:
+            asked = _ticket_questions_asked.get(ticket_id, 0)
+        skip_gate = _wants_to_skip_questions(humans) or asked >= _MAX_READINESS_QUESTIONS
+        if not skip_gate:
+            readiness = assist.judge_readiness(consensus.task, transcript)
+            if not readiness.ready:
+                with _ticket_chat_lock:
+                    _ticket_consumed[ticket_id] = last_ts  # avoid re-asking every poll
+                    _ticket_questions_asked[ticket_id] = asked + 1
+                _ticket_chat_append(
+                    ticket_id,
+                    "Brain OS Agent",
+                    f"🤔 Before I build this, one question: {readiness.question}",
+                    is_bot=True,
+                )
+                return
+
+        with _ticket_chat_lock:
+            _ticket_consumed[ticket_id] = last_ts  # consume this agreement
+
+    # Build from the ticket description as the source of truth, with the agreed
+    # chat task as extra context. This keeps the agent grounded in what the
+    # ticket actually asked for rather than drifting on chat clarifications.
+    desc = (ticket.get("description") or "").strip()
+    build_task = consensus.task
+    if desc:
+        build_task = (
+            f"Ticket: {ticket['title']}\n{desc}\n\n"
+            f"Agreed change to implement:\n{consensus.task}"
+        )
+
+    _ticket_chat_append(
+        ticket_id,
+        "Brain OS Agent",
+        f"🤖 Consensus reached — {ticket['assignee']} and {ticket['reporter']} "
+        f"both agreed. Implementing now:\n{consensus.task}",
+        is_bot=True,
+    )
+    try:
+        run = runs_service.run_sync(build_task)
+    except Exception as exc:  # noqa: BLE001 - surface failure in the chat
+        _ticket_chat_append(
+            ticket_id, "Brain OS Agent", f"⚠️ {type(exc).__name__}: {exc}", is_bot=True
+        )
+        return
+    if run.pr_url:
+        try:
+            tickets_service.set_pr(uuid.UUID(ticket_id), run.pr_url)
+        except TicketError:
+            pass
+        _ticket_chat_append(
+            ticket_id,
+            "Brain OS Agent",
+            "✅ Done — opened a PR with the change. Ticket moved to In Review.",
+            is_bot=True,
+            pr_url=run.pr_url,
+        )
+
+        # #5 summary + #6 risk triage, from the PR's actual changed files.
+        pr_number = runs_service._pr_number_from_url(run.pr_url)
+        paths = get_pr_file_paths(pr_number) if pr_number else []
+        summary = assist.summarize_change(consensus.task, paths)
+        if summary:
+            _ticket_chat_append(
+                ticket_id, "Brain OS Agent", f"📝 What changed: {summary}", is_bot=True
+            )
+        risk = assist.assess_risk(consensus.task, paths)
+        _ticket_chat_append(
+            ticket_id, "Brain OS Agent", _risk_message(risk), is_bot=True
+        )
+
+        _ticket_chat_append(ticket_id, "Brain OS Agent", "⏳ Running CI checks…", is_bot=True)
+        runs_service.watch_ci(
+            run.run_id,
+            run.pr_url,
+            after_step=run.steps,
+            on_result=lambda summary: _ticket_chat_append(
+                ticket_id, "Brain OS Agent", _ci_message(summary), is_bot=True
+            ),
+            on_progress=lambda text: _ticket_chat_append(
+                ticket_id, "Brain OS Agent", text, is_bot=True
+            ),
+        )
+    else:
+        _ticket_chat_append(
+            ticket_id,
+            "Brain OS Agent",
+            f"⚠️ {run.final_text or 'no PR produced'}",
+            is_bot=True,
+        )
+
+
+# --- #7 Completion report + channel teardown ---------------------------
+def _render_report_markdown(ticket: dict, report: assist.Report) -> str:
+    lines = [f"# {ticket['key']} — {ticket['title']}", ""]
+    if report.summary:
+        lines += [report.summary, ""]
+    lines += [
+        f"**Assignee:** {ticket['assignee']}  ·  **Reporter:** {ticket['reporter']}",
+        f"**PR:** {ticket.get('pr_url') or '(none)'}",
+        "",
+    ]
+    if report.key_contributor:
+        lines += [f"**Key contributor:** {report.key_contributor}", ""]
+    if report.participants:
+        lines += [f"**Participants:** {', '.join(report.participants)}", ""]
+    if report.decisions:
+        lines += ["## Decisions", *[f"- {d}" for d in report.decisions], ""]
+    if report.action_items:
+        lines += ["## Action items", *[f"- {a}" for a in report.action_items], ""]
+    return "\n".join(lines).strip()
+
+
+@app.post("/tickets/{ticket_id}/complete")
+def complete_ticket(ticket_id: str, require_merge: bool = False) -> dict:
+    """Generate the wrap-up report, store it, tear down the channel, close ticket.
+
+    If require_merge=true, refuses unless the PR is actually merged on GitHub.
+    """
+    ticket = _ticket_or_404(ticket_id)
+    rid = uuid.UUID(ticket_id)
+
+    if require_merge:
+        pr_number = (
+            runs_service._pr_number_from_url(ticket["pr_url"])
+            if ticket.get("pr_url")
+            else None
+        )
+        if pr_number is None or not get_pr_state(pr_number).get("merged"):
+            raise HTTPException(
+                status_code=409, detail="PR is not merged yet — cannot close."
+            )
+
+    # Build the transcript from the (in-memory) channel messages.
+    with _ticket_chat_lock:
+        msgs = list(_ticket_messages.get(ticket_id, []))
+    transcript = "\n".join(
+        f"{m['user']}: {m['text']}" for m in msgs if m.get("text")
+    )
+
+    report = assist.generate_report(ticket, transcript)
+    content = _render_report_markdown(ticket, report)
+    saved = reports_service.save_report(
+        ticket_id=rid,
+        ticket_key=ticket["key"],
+        title=ticket["title"],
+        content=content,
+        data=report.raw,
+    )
+
+    # Tear down the channel: wipe its messages and detach it, then close ticket.
+    with _ticket_chat_lock:
+        _ticket_messages.pop(ticket_id, None)
+        _ticket_consumed.pop(ticket_id, None)
+        _ticket_questions_asked.pop(ticket_id, None)
+    tickets_service.close_ticket(rid)
+    return saved
+
+
+@app.get("/reports")
+def list_reports() -> list[dict]:
+    return reports_service.list_reports()
+
+
+@app.get("/reports/{report_id}")
+def get_report(report_id: str) -> dict:
+    try:
+        rid = uuid.UUID(report_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="report not found")
+    report = reports_service.get_report(rid)
+    if report is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    return report
+
+
+def _risk_message(risk: assist.Risk) -> str:
+    icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk.level, "🟢")
+    base = f"{icon} Risk: {risk.level}"
+    if risk.areas:
+        base += f" (touches {', '.join(risk.areas)})"
+    if risk.note:
+        base += f" — {risk.note}"
+    if risk.needs_human:
+        base += "\n⚠️ Recommend a human review before merge."
+    return base
 
 
 @app.post("/runs")

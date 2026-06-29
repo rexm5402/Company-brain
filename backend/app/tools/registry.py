@@ -10,6 +10,7 @@ from app.tools.base import Tool
 from app.tools.context import RunContext
 from app.tools.github_tool import (
     CommentOnPRTool,
+    CommitToBranchTool,
     GetFileContentsTool,
     GetPRChecksTool,
     ListRepoFilesTool,
@@ -18,13 +19,22 @@ from app.tools.github_tool import (
 from app.tools.slack_tool import PostSlackMessageTool
 
 
-def build_registry(ctx: RunContext) -> dict[str, Tool]:
+def build_registry(ctx: RunContext, *, fix_mode: bool = False) -> dict[str, Tool]:
+    """Tools for a run.
+
+    Normal runs open a PR. In fix_mode (iterate-on-red), the agent instead
+    commits to the existing PR branch, so swap open_pull_request for
+    commit_to_branch.
+    """
     tools: list[Tool] = [
         ListRepoFilesTool(ctx),
         GetFileContentsTool(ctx),
-        OpenPullRequestTool(ctx),
         CommentOnPRTool(ctx),
         GetPRChecksTool(ctx),
         PostSlackMessageTool(),
     ]
+    if fix_mode:
+        tools.append(CommitToBranchTool(ctx))
+    else:
+        tools.append(OpenPullRequestTool(ctx))
     return {t.name: t for t in tools}

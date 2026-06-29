@@ -20,7 +20,11 @@ from app.audit.recorder import ToolResult, record_tool_call
 from app.db import SessionLocal
 from app.runs.models import RunRecord
 from app.tools.context import RunContext
-from app.tools.github_tool import GetPRChecksTool
+from app.tools.github_tool import (
+    GetPRChecksTool,
+    get_failing_ci_logs,
+    get_pr_branch,
+)
 
 # CI polling: how long to wait for GitHub Actions to finish before giving up.
 _CI_POLL_SECONDS = 8
@@ -30,6 +34,10 @@ _CI_MAX_WAIT_SECONDS = 240
 # waiting for a run to appear during this grace window before concluding that
 # the repo has no CI configured.
 _CI_NONE_GRACE_SECONDS = 45
+# Iterate-on-red: when CI fails, the agent reads the logs and pushes a fix to
+# the same PR branch, then we re-watch. Bound the attempts so a persistently
+# broken build can't loop forever.
+_MAX_FIX_ATTEMPTS = 2
 
 
 def create_run(task: str) -> uuid.UUID:
@@ -103,20 +111,25 @@ def watch_ci(
     *,
     after_step: int = 0,
     on_result: Optional[Callable[[dict[str, Any]], None]] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
+    fix_attempt: int = 0,
 ) -> None:
     """Poll a PR's GitHub Actions checks in the background.
 
     Records a single `ci_check` audit step (so the dashboard report/terminal
-    show pass/fail) once checks settle, and optionally calls `on_result` with
-    the summary (used to post the verdict back into a chat/Slack channel).
-    Non-blocking: spawns a daemon thread.
+    show pass/fail) once checks settle. When CI fails, runs the iterate-on-red
+    fix loop (read logs -> push a fix to the PR branch -> re-watch), bounded by
+    `_MAX_FIX_ATTEMPTS`. Calls `on_result` with the final summary once CI is
+    green or the fix attempts are exhausted; `on_progress(text)` is called with
+    human-readable status updates during the fix loop. Non-blocking: spawns a
+    daemon thread.
     """
     pr_number = _pr_number_from_url(pr_url)
     if pr_number is None:
         return
     threading.Thread(
         target=_watch_ci,
-        args=(run_id, pr_number, after_step + 1, on_result),
+        args=(run_id, pr_number, after_step + 1, on_result, on_progress, fix_attempt),
         daemon=True,
     ).start()
 
@@ -126,6 +139,8 @@ def _watch_ci(
     pr_number: int,
     step: int,
     on_result: Optional[Callable[[dict[str, Any]], None]],
+    on_progress: Optional[Callable[[str], None]] = None,
+    fix_attempt: int = 0,
 ) -> None:
     tool = GetPRChecksTool(RunContext())
     started = time.monotonic()
@@ -173,11 +188,99 @@ def _watch_ci(
             success=final_state not in ("failure", "unknown"), output=summary
         ),
     )
+
+    # Iterate-on-red: a failing build is the one state we can act on. If we have
+    # attempts left, read the logs, let the agent push a fix to the same branch,
+    # and re-enter the watcher. The fix run continues on the next audit step.
+    if final_state == "failure" and fix_attempt < _MAX_FIX_ATTEMPTS:
+        if _attempt_fix(run_id, pr_number, step + 1, fix_attempt, on_progress):
+            _watch_ci(
+                run_id,
+                pr_number,
+                step + 2,
+                on_result,
+                on_progress,
+                fix_attempt + 1,
+            )
+            return
+
     if on_result is not None:
         try:
             on_result(summary)
         except Exception:  # noqa: BLE001 - notification must never crash the watcher
             pass
+
+
+def _attempt_fix(
+    run_id: uuid.UUID,
+    pr_number: int,
+    step: int,
+    fix_attempt: int,
+    on_progress: Optional[Callable[[str], None]],
+) -> bool:
+    """Read the failing CI logs and let the agent push a fix to the PR branch.
+
+    Returns True if a fix was committed (so the caller should re-watch CI),
+    False if we couldn't act (no branch/logs, or the fix run didn't commit).
+    """
+    attempt_no = fix_attempt + 1
+    if on_progress is not None:
+        try:
+            on_progress(
+                f"🔧 CI failed — attempting an automatic fix "
+                f"(attempt {attempt_no}/{_MAX_FIX_ATTEMPTS})…"
+            )
+        except Exception:  # noqa: BLE001 - progress posting must never crash the loop
+            pass
+
+    branch = get_pr_branch(pr_number)
+    logs = get_failing_ci_logs(pr_number)
+    if not branch or not logs:
+        if on_progress is not None:
+            try:
+                on_progress(
+                    "⚠️ Couldn't read the CI logs or PR branch — skipping the "
+                    "automatic fix. A human should take a look."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    fix_task = (
+        f"The CI build for PR #{pr_number} (branch `{branch}`) is failing. "
+        f"Read the failing build logs below, diagnose the root cause, and "
+        f"commit a minimal fix to branch `{branch}` using commit_to_branch.\n\n"
+        f"--- FAILING CI LOGS ---\n{logs}"
+    )
+    try:
+        result = run_agent(fix_task, run_id=run_id, fix_mode=True)
+    except Exception as exc:  # noqa: BLE001 - a failed fix run must not crash the watcher
+        if on_progress is not None:
+            try:
+                on_progress(f"⚠️ Automatic fix run errored: {type(exc).__name__}: {exc}")
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    if not result.committed_branch:
+        if on_progress is not None:
+            try:
+                on_progress(
+                    "⚠️ The agent couldn't produce a fix for this failure. "
+                    "A human should take a look."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    if on_progress is not None:
+        try:
+            on_progress(
+                f"✅ Pushed a fix to `{branch}` — re-running CI to check if it's green."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return True
 
 
 def _update(run_id: uuid.UUID, **fields: Any) -> None:

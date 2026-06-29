@@ -471,6 +471,215 @@ class GetPRChecksTool(_GitHubTool):
         return "success"
 
 
+def get_pr_branch(pr_number: int) -> str | None:
+    """The head branch name for a PR, or None on failure."""
+    s = get_settings()
+    if not s.github_repo:
+        return None
+    headers = {
+        "Authorization": f"Bearer {s.github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            r = client.get(f"{_API}/repos/{s.github_repo}/pulls/{pr_number}")
+            r.raise_for_status()
+            return r.json().get("head", {}).get("ref")
+    except httpx.HTTPError:
+        return None
+
+
+def _relevant_log_slice(text: str, max_chars: int) -> str:
+    """Return a window of the log centred on the actual error.
+
+    GitHub appends checkout/cleanup steps *after* the failing step, so a blind
+    tail of the log often captures only that trailing noise and truncates the
+    real error out. Instead, find the last error marker and keep the context
+    just before it (where the diagnostic detail lives) plus a little after.
+    """
+    if len(text) <= max_chars:
+        return text
+    markers = (
+        "##[error]",
+        "SyntaxError",
+        "Traceback (most recent call last)",
+        "Error compiling",
+        "AssertionError",
+        "FAILED",
+        "error:",
+    )
+    pos = max((text.rfind(m) for m in markers), default=-1)
+    if pos == -1:
+        return text[-max_chars:]
+    after = 400  # a little context past the marker
+    start = max(0, pos - (max_chars - after))
+    end = min(len(text), pos + after)
+    return text[start:end]
+
+
+def get_failing_ci_logs(pr_number: int, *, max_chars: int = 6000) -> str:
+    """Fetch the log text of the failed jobs for a PR's latest workflow run.
+
+    Reads via the Actions API (needs Actions:read). Returns the region of the
+    combined failing-job logs around the actual error (see _relevant_log_slice),
+    truncated to max_chars. Empty string if nothing is retrievable.
+    """
+    s = get_settings()
+    if not s.github_repo:
+        return ""
+    headers = {
+        "Authorization": f"Bearer {s.github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        with httpx.Client(timeout=30.0, headers=headers, follow_redirects=True) as client:
+            pr = client.get(f"{_API}/repos/{s.github_repo}/pulls/{pr_number}")
+            pr.raise_for_status()
+            head_sha = pr.json()["head"]["sha"]
+            runs = client.get(
+                f"{_API}/repos/{s.github_repo}/actions/runs",
+                params={"head_sha": head_sha},
+            )
+            runs.raise_for_status()
+            workflow_runs = runs.json().get("workflow_runs", [])
+            if not workflow_runs:
+                return ""
+            run_id = workflow_runs[0]["id"]
+            jobs = client.get(
+                f"{_API}/repos/{s.github_repo}/actions/runs/{run_id}/jobs"
+            )
+            jobs.raise_for_status()
+            chunks: list[str] = []
+            for job in jobs.json().get("jobs", []):
+                if job.get("conclusion") in ("success", "neutral", "skipped", None):
+                    continue
+                log = client.get(
+                    f"{_API}/repos/{s.github_repo}/actions/jobs/{job['id']}/logs"
+                )
+                if log.status_code == 200 and log.text:
+                    chunks.append(f"--- job: {job.get('name')} ---\n{log.text}")
+            combined = "\n\n".join(chunks)
+            return _relevant_log_slice(combined, max_chars) if combined else ""
+    except (httpx.HTTPError, KeyError):
+        return ""
+
+
+def get_pr_state(pr_number: int) -> dict[str, Any]:
+    """Return {state, merged} for a PR. state is 'open'|'closed'. Best-effort."""
+    s = get_settings()
+    if not s.github_repo:
+        return {"state": "unknown", "merged": False}
+    headers = {
+        "Authorization": f"Bearer {s.github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            r = client.get(f"{_API}/repos/{s.github_repo}/pulls/{pr_number}")
+            r.raise_for_status()
+            data = r.json()
+            return {
+                "state": data.get("state", "unknown"),
+                "merged": bool(data.get("merged")),
+            }
+    except httpx.HTTPError:
+        return {"state": "unknown", "merged": False}
+
+
+def get_pr_file_paths(pr_number: int) -> list[str]:
+    """Best-effort list of file paths a PR changed. Empty list on any failure."""
+    s = get_settings()
+    if not s.github_repo:
+        return []
+    headers = {
+        "Authorization": f"Bearer {s.github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            r = client.get(
+                f"{_API}/repos/{s.github_repo}/pulls/{pr_number}/files",
+                params={"per_page": 100},
+            )
+            r.raise_for_status()
+            return [f.get("filename") for f in r.json() if f.get("filename")]
+    except httpx.HTTPError:
+        return []
+
+
+class CommitToBranchTool(_GitHubTool):
+    name = "commit_to_branch"
+    description = (
+        "Commit fixed files to an EXISTING branch (e.g. a PR branch whose CI "
+        "failed) without opening a new PR. Supply the full content of every file "
+        "you are changing — not a diff. Python and JSON are syntax-checked before "
+        "committing. Use this to push a fix so CI re-runs on the same PR."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "branch": {"type": "string", "description": "Existing branch to commit to."},
+            "files": {
+                "type": "array",
+                "description": "Files to overwrite, with full contents.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+            "commit_message": {"type": "string"},
+        },
+        "required": ["branch", "files"],
+    }
+
+    def run(self, **kwargs: Any) -> ToolResult:
+        branch = kwargs["branch"]
+        files = kwargs["files"]
+        commit_message = kwargs.get("commit_message") or "Fix CI failure"
+        if not self._repo:
+            return ToolResult(success=False, error="GITHUB_REPO is not configured.")
+        if not files:
+            return ToolResult(success=False, error="No files supplied.")
+
+        syntax_errors = OpenPullRequestTool._validate_syntax(files)
+        if syntax_errors:
+            return ToolResult(
+                success=False,
+                error="Fix these before committing: " + "; ".join(syntax_errors),
+            )
+        try:
+            with self._client() as client:
+                if not self._branch_exists(client, branch):
+                    return ToolResult(
+                        success=False, error=f"Branch '{branch}' does not exist."
+                    )
+                for f in files:
+                    self._put_file(
+                        client, branch, f["path"], f["content"], commit_message
+                    )
+        except httpx.HTTPStatusError as exc:
+            return ToolResult(
+                success=False,
+                error=f"GitHub API {exc.response.status_code}: {exc.response.text[:500]}",
+            )
+        return ToolResult(
+            success=True,
+            output={"branch": branch, "files_changed": [f["path"] for f in files]},
+        )
+
+    # Reuse OpenPullRequestTool's branch/put helpers by sharing the methods.
+    _branch_exists = OpenPullRequestTool._branch_exists
+    _put_file = OpenPullRequestTool._put_file
+
+
 class CommentOnPRTool(_GitHubTool):
     name = "comment_on_pr"
     description = "Post a comment on an existing pull request (by PR number)."

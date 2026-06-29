@@ -12,7 +12,7 @@ from typing import Any
 
 from app.agent.llm import LLMClient, ToolCall
 from app.agent.reviewer import review_files
-from app.agent.system_prompt import SYSTEM_PROMPT
+from app.agent.system_prompt import FIX_SYSTEM_PROMPT, SYSTEM_PROMPT
 from app.audit.recorder import ToolResult, record_tool_call
 from app.tools.context import RunContext
 from app.tools.registry import build_registry
@@ -26,17 +26,23 @@ class AgentRun:
     final_text: str | None = None
     pr_url: str | None = None
     steps: int = 0
+    committed_branch: str | None = None  # set in fix_mode after commit_to_branch
     transcript: list[dict[str, Any]] = field(default_factory=list)
 
 
 def run_agent(
-    task: str, *, run_id: uuid.UUID | None = None, max_steps: int = MAX_STEPS
+    task: str,
+    *,
+    run_id: uuid.UUID | None = None,
+    max_steps: int = MAX_STEPS,
+    fix_mode: bool = False,
 ) -> AgentRun:
     run_id = run_id or uuid.uuid4()
     llm = LLMClient()
     ctx = RunContext()
-    registry = build_registry(ctx)
+    registry = build_registry(ctx, fix_mode=fix_mode)
     tool_schemas = [t.schema() for t in registry.values()]
+    system = FIX_SYSTEM_PROMPT if fix_mode else SYSTEM_PROMPT
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
     run = AgentRun(run_id=run_id)
@@ -44,9 +50,7 @@ def run_agent(
     for step in range(1, max_steps + 1):
         run.steps = step
         try:
-            response = llm.chat(
-                system=SYSTEM_PROMPT, messages=messages, tools=tool_schemas
-            )
+            response = llm.chat(system=system, messages=messages, tools=tool_schemas)
         except Exception as exc:  # provider error after retries -> end cleanly
             run.final_text = f"LLM call failed: {type(exc).__name__}: {exc}"
             break
@@ -69,6 +73,13 @@ def run_agent(
             result = _dispatch(run_id, step, registry, tc)
             if result.success and result.output and "pr_url" in result.output:
                 run.pr_url = result.output["pr_url"]
+            if (
+                tc.name == "commit_to_branch"
+                and result.success
+                and result.output
+                and "branch" in result.output
+            ):
+                run.committed_branch = result.output["branch"]
             _append_tool_result(messages, llm.provider, tc, result)
     else:
         run.final_text = "Reached max steps without finishing."

@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Company Brain OS — Work Hub</title>
+<style>
+  :root {
+    --bg: #0d0f17; --panel: #151823; --panel-2: #1b1f2e; --border: #262b3d;
+    --text: #e7eaf3; --muted: #8b93a7; --faint: #5b6378; --accent: #6d5dfc;
+    --green: #34d399; --amber: #fbbf24; --red: #f87171; --blue: #60a5fa;
+    --radius: 14px;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--sans);
+    background: radial-gradient(1200px 600px at 80% -10%, #1a1330 0%, transparent 60%), var(--bg);
+    color: var(--text); height: 100vh; overflow: hidden;
+  }
+  .topbar {
+    height: 58px; display: flex; align-items: center; gap: 14px; padding: 0 20px;
+    border-bottom: 1px solid var(--border); background: rgba(21,24,35,0.7); backdrop-filter: blur(8px);
+  }
+  .logo {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), #a855f7);
+    display: grid; place-items: center; font-weight: 800; font-size: 15px; color: white;
+  }
+  .brand b { font-size: 15px; } .brand span { font-size: 11.5px; color: var(--muted); display:block; }
+  .topbar a { margin-left: auto; color: var(--muted); text-decoration: none; font-size: 13px; }
+  .topbar a:hover { color: var(--text); }
+
+  .layout { display: grid; grid-template-columns: 420px 1fr; height: calc(100vh - 58px); }
+  .col { overflow-y: auto; padding: 18px; }
+  .col.left { border-right: 1px solid var(--border); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 12px; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px; margin-bottom: 12px; cursor: pointer; transition: border-color .15s;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .card .key { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  .card .title { font-size: 14px; font-weight: 600; margin: 3px 0 6px; }
+  .card .meta { font-size: 12px; color: var(--muted); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .badge.open { background: #2a2f42; color: var(--muted); }
+  .badge.in_progress { background: rgba(96,165,250,.15); color: var(--blue); }
+  .badge.in_review { background: rgba(251,191,36,.15); color: var(--amber); }
+  .badge.done { background: rgba(52,211,153,.15); color: var(--green); }
+
+  input, textarea, select, button { font-family: inherit; }
+  .field { margin-bottom: 10px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .field input, .field textarea {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 9px 11px; color: var(--text); font-size: 13px;
+  }
+  .field textarea { resize: vertical; min-height: 60px; }
+  .btn {
+    background: var(--accent); color: white; border: none; border-radius: 10px;
+    padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .btn:hover { filter: brightness(1.1); } .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.ghost { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
+  .err { color: var(--red); font-size: 12px; margin-top: 6px; min-height: 14px; }
+
+  /* detail / chat */
+  .detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .detail-head .title { font-size: 18px; font-weight: 700; }
+  .detail-sub { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+  .detail-sub b { color: var(--text); }
+  .chat { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; height: calc(100vh - 320px); min-height: 280px; }
+  .msgs { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { display: flex; gap: 9px; }
+  .av { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: white; flex-shrink: 0; }
+  .av.bot { background: linear-gradient(135deg, var(--accent), #a855f7); }
+  .av.u0 { background: #2563eb; } .av.u1 { background: #059669; }
+  .msg .body .who { font-size: 12px; font-weight: 600; margin-bottom: 1px; }
+  .msg .body .text { font-size: 13.5px; line-height: 1.4; white-space: pre-wrap; }
+  .msg .body .pr { display: inline-block; margin-top: 5px; font-size: 12px; color: var(--blue); text-decoration: none; }
+  .composer { border-top: 1px solid var(--border); padding: 10px; display: flex; gap: 8px; align-items: center; }
+  .composer select { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 9px; padding: 8px; font-size: 12px; }
+  .composer input { flex: 1; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 9px; padding: 9px 11px; font-size: 13px; }
+  .empty { color: var(--faint); text-align: center; padding: 40px 0; font-size: 14px; }
+  .hint { font-size: 12px; color: var(--faint); margin-top: 8px; line-height: 1.5; }
+  .actions { display: flex; gap: 8px; margin: 12px 0 4px; flex-wrap: wrap; }
+
+  /* reports modal */
+  .modal-bg { position: fixed; inset: 0; background: rgba(5,6,12,.65); backdrop-filter: blur(3px); display: grid; place-items: center; z-index: 50; }
+  .modal { width: min(900px, 92vw); height: min(660px, 88vh); background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; overflow: hidden; }
+  .modal-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; }
+  .modal-head b { font-size: 15px; } .modal-head .x { margin-left: auto; cursor: pointer; color: var(--muted); font-size: 16px; }
+  .modal-head .x:hover { color: var(--text); }
+  .modal-body { flex: 1; display: grid; grid-template-columns: 260px 1fr; overflow: hidden; }
+  .reports-list { border-right: 1px solid var(--border); overflow-y: auto; padding: 12px; }
+  .report-view { overflow-y: auto; padding: 18px 22px; }
+  .report-view pre { white-space: pre-wrap; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: var(--text); }
+  .ritem { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; cursor: pointer; background: var(--panel-2); }
+  .ritem:hover { border-color: var(--accent); }
+  .ritem .key { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  .ritem .title { font-size: 13px; font-weight: 600; margin-top: 2px; }
+  .ritem .when { font-size: 11px; color: var(--faint); margin-top: 3px; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="logo">B</div>
+    <div class="brand"><b>Company Brain OS</b><span>Work Hub — tickets → discuss → ship</span></div>
+    <a href="#" onclick="openReports();return false;">Reports</a>
+    <a href="/index.html" style="margin-left:18px;">Agent dashboard →</a>
+  </div>
+
+  <div id="reportsModal" class="modal-bg" style="display:none;" onclick="if(event.target===this)closeReports()">
+    <div class="modal">
+      <div class="modal-head"><b>Completion reports</b><span class="x" onclick="closeReports()">✕</span></div>
+      <div class="modal-body">
+        <div id="reportsList" class="reports-list"></div>
+        <div id="reportView" class="report-view"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="layout">
+    <div class="col left">
+      <h2>New ticket</h2>
+      <div class="card" style="cursor:default;">
+        <div class="field"><label>Title</label><input id="t_title" placeholder="Add a LICENSE file" /></div>
+        <div class="field"><label>Description</label><textarea id="t_desc" placeholder="What needs to change, and where."></textarea></div>
+        <div class="field"><label>Assignee</label><input id="t_assignee" placeholder="Alice" /></div>
+        <div class="field"><label>Reporter</label><input id="t_reporter" placeholder="Bob" /></div>
+        <button class="btn" onclick="createTicket()">Create ticket</button>
+        <div class="err" id="t_err"></div>
+      </div>
+      <h2 style="margin-top:18px;">Tickets</h2>
+      <div id="ticketList"></div>
+    </div>
+
+    <div class="col right" id="detail">
+      <div class="empty">Select a ticket to open its channel.</div>
+    </div>
+  </div>
+
+<script>
+const API = "";
+let activeId = null;
+let activeTicket = null;
+
+async function api(path, opts) {
+  const r = await fetch(API + path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || ("HTTP " + r.status));
+  return body;
+}
+
+async function createTicket() {
+  const err = document.getElementById("t_err");
+  err.textContent = "";
+  const payload = {
+    title: document.getElementById("t_title").value,
+    description: document.getElementById("t_desc").value,
+    assignee: document.getElementById("t_assignee").value,
+    reporter: document.getElementById("t_reporter").value,
+  };
+  try {
+    await api("/tickets", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+    document.getElementById("t_title").value = "";
+    document.getElementById("t_desc").value = "";
+    document.getElementById("t_assignee").value = "";
+    document.getElementById("t_reporter").value = "";
+    loadTickets();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function loadTickets() {
+  const list = document.getElementById("ticketList");
+  let tickets = [];
+  try { tickets = await api("/tickets"); } catch { return; }
+  if (!tickets.length) { list.innerHTML = '<div class="empty">No tickets yet.</div>'; return; }
+  list.innerHTML = tickets.map(t => `
+    <div class="card ${t.id === activeId ? 'active' : ''}" onclick="openTicket('${t.id}')">
+      <div class="key">${t.key}</div>
+      <div class="title">${esc(t.title)}</div>
+      <div class="meta">${esc(t.assignee)} ↔ ${esc(t.reporter)} &nbsp;·&nbsp; <span class="badge ${t.status}">${t.status.replace('_',' ')}</span></div>
+    </div>`).join("");
+}
+
+async function openTicket(id) {
+  activeId = id;
+  activeTicket = await api("/tickets/" + id);
+  loadTickets();
+  renderDetail();
+  loadMessages();
+}
+
+function renderDetail() {
+  const t = activeTicket;
+  const started = !!t.channel;
+  document.getElementById("detail").innerHTML = `
+    <div class="detail-head">
+      <span class="key" style="font-family:var(--mono);color:var(--accent);font-size:13px;">${t.key}</span>
+      <span class="title">${esc(t.title)}</span>
+      <span class="badge ${t.status}">${t.status.replace('_',' ')}</span>
+    </div>
+    <div class="detail-sub">${esc(t.description || 'No description.')}<br>
+      Assignee <b>${esc(t.assignee)}</b> · Reporter <b>${esc(t.reporter)}</b>
+      ${t.pr_url ? ` · <a href="${t.pr_url}" target="_blank" style="color:var(--blue)">View PR →</a>` : ''}
+    </div>
+    ${t.details ? `<details style="margin-bottom:14px;"><summary class="hint" style="cursor:pointer;margin:0;">AI-enriched spec (acceptance criteria & questions)</summary>
+      <pre style="white-space:pre-wrap;font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5;">${esc(t.details)}</pre></details>` : ''}
+    ${completeBar(t)}
+    ${started ? chatHtml(t) : (t.status === 'done' ? '' : `
+      <button class="btn" onclick="startTicket()">Start working — open channel</button>
+      <div class="hint">Opening the channel lets <b>${esc(t.assignee)}</b> and <b>${esc(t.reporter)}</b> discuss.
+      When both agree to a concrete change, the agent ships a PR automatically.</div>`)}
+  `;
+}
+
+function completeBar(t) {
+  if (t.status === 'done') {
+    return `<div class="actions"><span class="badge done">done</span>
+      <button class="btn ghost" onclick="openReports()">View report →</button></div>`;
+  }
+  if (!t.pr_url) return '';
+  return `<div class="actions">
+      <button class="btn" id="completeBtn" onclick="completeTicket(false)">Complete & generate report</button>
+      <button class="btn ghost" onclick="completeTicket(true)">Require merged PR</button>
+    </div>
+    <div class="hint">Completing wraps up the work: it generates a minutes-of-meeting report
+    (decisions, action items, key contributor), stores it, and tears down this channel.</div>`;
+}
+
+async function completeTicket(requireMerge) {
+  if (!confirm("Complete this ticket? This generates the report and tears down the channel.")) return;
+  const btn = document.getElementById("completeBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Generating report…"; }
+  try {
+    const saved = await api("/tickets/" + activeId + "/complete?require_merge=" + (requireMerge ? "true" : "false"), { method: "POST" });
+    activeTicket = await api("/tickets/" + activeId);
+    loadTickets(); renderDetail();
+    openReports(saved.id);
+  } catch (e) {
+    alert(e.message);
+    if (btn) { btn.disabled = false; btn.textContent = "Complete & generate report"; }
+  }
+}
+
+async function openReports(selectId) {
+  document.getElementById("reportsModal").style.display = "grid";
+  let reports = [];
+  try { reports = await api("/reports"); } catch {}
+  const list = document.getElementById("reportsList");
+  if (!reports.length) {
+    list.innerHTML = '<div class="empty">No reports yet.</div>';
+    document.getElementById("reportView").innerHTML = '<div class="empty">Complete a ticket to generate one.</div>';
+    return;
+  }
+  list.innerHTML = reports.map(r => `
+    <div class="ritem" onclick="viewReport('${r.id}')">
+      <div class="key">${esc(r.ticket_key)}</div>
+      <div class="title">${esc(r.title)}</div>
+      <div class="when">${new Date(r.created_at).toLocaleString()}</div>
+    </div>`).join("");
+  viewReport(selectId || reports[0].id);
+}
+
+async function viewReport(id) {
+  const view = document.getElementById("reportView");
+  view.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await api("/reports/" + id);
+    view.innerHTML = `<pre>${esc(r.content)}</pre>`;
+  } catch (e) { view.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
+}
+
+function closeReports() { document.getElementById("reportsModal").style.display = "none"; }
+
+function chatHtml(t) {
+  return `
+    <div class="chat">
+      <div class="msgs" id="msgs"></div>
+      <div class="composer">
+        <select id="asUser">
+          <option value="${esc(t.assignee)}">${esc(t.assignee)} (assignee)</option>
+          <option value="${esc(t.reporter)}">${esc(t.reporter)} (reporter)</option>
+        </select>
+        <input id="msgInput" placeholder="Message #${esc(t.channel)}" onkeydown="if(event.key==='Enter')sendMsg()" />
+        <button class="btn" onclick="sendMsg()">Send</button>
+      </div>
+    </div>
+    <div class="hint">Only the assignee and reporter can post here. Both must agree before the agent acts —
+    that two-person sign-off is the authorization to ship.</div>`;
+}
+
+async function startTicket() {
+  activeTicket = await api("/tickets/" + activeId + "/start", { method: "POST" });
+  loadTickets(); renderDetail(); loadMessages();
+}
+
+async function sendMsg() {
+  const input = document.getElementById("msgInput");
+  const user = document.getElementById("asUser").value;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  try {
+    await api("/tickets/" + activeId + "/send", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ user, text })
+    });
+  } catch (e) { alert(e.message); }
+  loadMessages();
+}
+
+async function loadMessages() {
+  if (!activeId || !activeTicket || !activeTicket.channel) return;
+  const box = document.getElementById("msgs");
+  if (!box) return;
+  let data;
+  try { data = await api("/tickets/" + activeId + "/messages"); } catch { return; }
+  const t = activeTicket;
+  box.innerHTML = data.messages.map(m => {
+    const cls = m.is_bot ? "bot" : (m.user === t.assignee ? "u0" : "u1");
+    const initial = m.is_bot ? "B" : (m.user[0] || "?").toUpperCase();
+    const pr = m.pr_url ? `<a class="pr" href="${m.pr_url}" target="_blank">${m.pr_url}</a>` : "";
+    return `<div class="msg">
+      <div class="av ${cls}">${initial}</div>
+      <div class="body"><div class="who">${esc(m.user)}</div><div class="text">${esc(m.text)}</div>${pr}</div>
+    </div>`;
+  }).join("");
+  box.scrollTop = box.scrollHeight;
+  // Refresh ticket status (it flips to in_review when the PR opens).
+  const fresh = await api("/tickets/" + activeId).catch(() => null);
+  if (fresh && fresh.status !== t.status) { activeTicket = fresh; renderDetail(); loadTickets(); loadMessages(); }
+}
+
+function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+loadTickets();
+setInterval(() => { if (activeTicket && activeTicket.channel) loadMessages(); }, 2500);
+setInterval(loadTickets, 5000);
+</script>
+</body>
+</html>
