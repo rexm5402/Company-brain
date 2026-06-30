@@ -1,0 +1,14 @@
+# Exclude everything that doesn't belong in the production image.
+**/__pycache__
+**/*.pyc
+**/.venv
+**/node_modules
+**/.git
+**/.env
+**/tests/
+**/alembic.ini
+*.md
+docker-compose.yml
+.dockerignore
+.github/
+frontend/

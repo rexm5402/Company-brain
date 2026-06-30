@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: brain_os
+      POSTGRES_PASSWORD: brain_os
+      POSTGRES_DB: brain_os
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain_os"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build: .
+    command: python -m alembic upgrade head
+    env_file: backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://brain_os:brain_os@db:5432/brain_os
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8077:8077"
+    env_file: backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://brain_os:brain_os@db:5432/brain_os
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8077/health')\""]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  pgdata:

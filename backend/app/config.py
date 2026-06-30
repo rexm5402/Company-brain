@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     github_repo: str = ""
     github_base_branch: str = "main"
 
+    # Pre-PR validation gate. Before opening a PR we materialize the proposed
+    # files over a fresh checkout of the base branch and check them:
+    #   off  - syntax check only (the historical behavior)
+    #   lint - also run `ruff` (static; does NOT execute the generated code)
+    #   full - also install deps + run `pytest` (DOES execute the code; only
+    #          turn on where running agent-generated code on the host is
+    #          acceptable, since pytest collection runs module-level code)
+    # Default "lint": catch real lint/import errors without executing untrusted
+    # code on the app host. CI (iterate-on-red) is the sandbox for full tests.
+    prepr_validation: Literal["off", "lint", "full"] = "lint"
+    prepr_validation_timeout: int = 120  # seconds, per subprocess step
+
     # Slack (Weekend 2)
     slack_bot_token: str = ""
     slack_watch_channel: str = ""  # channel name (e.g. #all-new-workspace) or ID

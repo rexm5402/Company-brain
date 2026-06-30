@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,6 +36,12 @@ class RunRecord(Base):
     pr_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     final_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     steps: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Token accounting (populated at run end from LLMClient usage)
+    prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()

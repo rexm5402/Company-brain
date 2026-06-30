@@ -26,6 +26,8 @@ class ToolCall:
 class LLMResponse:
     text: str | None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 class LLMClient:
@@ -122,7 +124,13 @@ class LLMClient:
                     arguments=_safe_json(tc.function.arguments),
                 )
             )
-        return LLMResponse(text=msg.content, tool_calls=tool_calls)
+        usage = getattr(resp, "usage", None)
+        return LLMResponse(
+            text=msg.content,
+            tool_calls=tool_calls,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        )
 
     # --- Anthropic ------------------------------------------------------
     def _chat_anthropic(
@@ -152,9 +160,12 @@ class LLMClient:
                 tool_calls.append(
                     ToolCall(id=block.id, name=block.name, arguments=dict(block.input))
                 )
+        usage = getattr(resp, "usage", None)
         return LLMResponse(
             text="\n".join(text_parts) if text_parts else None,
             tool_calls=tool_calls,
+            prompt_tokens=getattr(usage, "input_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "output_tokens", 0) or 0,
         )
 
 

@@ -18,6 +18,7 @@ from app.agent.loop import run_agent
 from app.audit.models import AuditLog
 from app.audit.recorder import ToolResult, record_tool_call
 from app.db import SessionLocal
+from app.observability import capture_exception, estimate_cost
 from app.runs.models import RunRecord
 from app.tools.context import RunContext
 from app.tools.github_tool import (
@@ -64,36 +65,54 @@ def run_sync(task: str):
         session.commit()
     try:
         result = run_agent(task, run_id=run_id)
+        cost = estimate_cost(result.model, result.prompt_tokens, result.completion_tokens)
         _update(
             run_id,
             status="done" if result.pr_url else "error",
             pr_url=result.pr_url,
             final_text=result.final_text,
             steps=result.steps,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            cost_usd=cost,
+            model=result.model,
         )
         return result
     except Exception as exc:  # noqa: BLE001 - record any failure for the UI
-        _update(run_id, status="error", final_text=f"{type(exc).__name__}: {exc}")
+        capture_exception(exc)
+        _update(
+            run_id,
+            status="error",
+            final_text=f"{type(exc).__name__}: {exc}",
+            error_detail=str(exc),
+        )
         raise
 
 
 def _execute(run_id: uuid.UUID, task: str) -> None:
     try:
         result = run_agent(task, run_id=run_id)
+        cost = estimate_cost(result.model, result.prompt_tokens, result.completion_tokens)
         _update(
             run_id,
             status="done" if result.pr_url else "error",
             pr_url=result.pr_url,
             final_text=result.final_text,
             steps=result.steps,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            cost_usd=cost,
+            model=result.model,
         )
         if result.pr_url:  # surface CI status on the dashboard report
             watch_ci(run_id, result.pr_url, after_step=result.steps)
     except Exception as exc:  # noqa: BLE001 - record any failure for the UI
+        capture_exception(exc)
         _update(
             run_id,
             status="error",
             final_text=f"{type(exc).__name__}: {exc}",
+            error_detail=str(exc),
         )
 
 
@@ -309,6 +328,10 @@ def get_run(run_id: uuid.UUID) -> dict[str, Any] | None:
             "status": row.status,
             "pr_url": row.pr_url,
             "final_text": row.final_text,
+            "model": row.model,
+            "prompt_tokens": row.prompt_tokens,
+            "completion_tokens": row.completion_tokens,
+            "cost_usd": row.cost_usd,
             "steps": [
                 {
                     "step": s.step,

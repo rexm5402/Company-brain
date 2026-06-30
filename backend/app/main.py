@@ -6,9 +6,8 @@ the source of truth for "what did the agent do".
 """
 from __future__ import annotations
 
-import threading
-import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -20,8 +19,11 @@ from sqlalchemy.orm import Session
 
 from app.agent.llm import LLMClient
 from app.audit.models import AuditLog
+from app.chat import service as chat_service
+from app.chat.models import LOCAL_CHANNEL
 from app.config import get_settings
 from app.db import get_session
+from app.observability import init_observability
 from app.runs import service as runs_service
 from app.slack.client import SlackClient, SlackError
 from app.slack.detector import detect_consensus
@@ -30,6 +32,8 @@ from app.reports import service as reports_service
 from app.tickets import service as tickets_service
 from app.tickets.service import TicketError
 from app.tools.github_tool import get_pr_file_paths, get_pr_state
+
+init_observability()
 
 app = FastAPI(title="Company Brain OS — Engineering Agent", version="0.1.0")
 
@@ -45,6 +49,12 @@ app.add_middleware(
 )
 
 _FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+
+# Consensus checks run off the request thread, but we cap concurrency instead of
+# spawning an unbounded daemon thread per message — a burst of chatter can't
+# exhaust the process. Correctness across these workers (and across processes)
+# comes from the row-level claim in chat_service, not from a thread count.
+_consensus_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="consensus")
 
 
 class RunRequest(BaseModel):
@@ -144,10 +154,7 @@ def slack_send(req: SendRequest) -> dict:
 # An in-app multi-user chat for testing the consensus flow without two real
 # Slack accounts. Open two browser windows (?as=User 1 / ?as=User 2), chat, and
 # when two distinct people agree the agent fires — same pipeline as Slack.
-_chat_lock = threading.Lock()
-_chat_messages: list[dict] = []
-_chat_consumed_ts: dict[str, float] = {"ts": 0.0}
-_consensus_lock = threading.Lock()  # serialize consensus checks
+# State is persisted in Postgres (chat_service), so it survives restarts.
 
 
 class ChatSend(BaseModel):
@@ -156,29 +163,19 @@ class ChatSend(BaseModel):
 
 
 def _chat_append(user: str, text: str, *, is_bot: bool, pr_url: str | None = None) -> None:
-    with _chat_lock:
-        _chat_messages.append(
-            {
-                "user": user,
-                "text": text,
-                "ts": time.time(),
-                "is_bot": is_bot,
-                "pr_url": pr_url,
-            }
-        )
+    chat_service.append_message(
+        LOCAL_CHANNEL, user, text, is_bot=is_bot, pr_url=pr_url
+    )
 
 
 @app.get("/chat/messages")
 def chat_messages() -> dict:
-    with _chat_lock:
-        return {"messages": list(_chat_messages)}
+    return {"messages": chat_service.list_messages(LOCAL_CHANNEL)}
 
 
 @app.post("/chat/reset")
 def chat_reset() -> dict[str, str]:
-    with _chat_lock:
-        _chat_messages.clear()
-        _chat_consumed_ts["ts"] = 0.0
+    chat_service.clear_channel(LOCAL_CHANNEL)
     return {"status": "cleared"}
 
 
@@ -189,21 +186,18 @@ def chat_send(req: ChatSend) -> dict[str, bool]:
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
     _chat_append(user, text, is_bot=False)
-    threading.Thread(target=_chat_consensus_check, daemon=True).start()
+    _consensus_pool.submit(_chat_consensus_check)
     return {"ok": True}
-
-
-_chat_draft_consumed: dict[str, float] = {"ts": 0.0}
 
 
 def _maybe_suggest_ticket(transcript: str, last_ts: float) -> None:
     """#3 Propose a ticket when the chat surfaces work, at most once per round."""
-    if last_ts <= _chat_draft_consumed["ts"]:
-        return
     draft = assist.draft_ticket(transcript)
     if not (draft.should_file and draft.title):
         return
-    _chat_draft_consumed["ts"] = last_ts
+    # CAS so two concurrent checks don't both post the same suggestion.
+    if not chat_service.claim_draft(LOCAL_CHANNEL, last_ts):
+        return
     desc = f"\n_{draft.description}_" if draft.description else ""
     _chat_append(
         "Brain OS Agent",
@@ -215,28 +209,28 @@ def _maybe_suggest_ticket(transcript: str, last_ts: float) -> None:
 
 def _chat_consensus_check() -> None:
     """If two distinct people just agreed, distill a task and run the agent."""
-    with _consensus_lock:  # one consensus run at a time
-        with _chat_lock:
-            humans = [m for m in _chat_messages if not m["is_bot"]]
-            distinct = {m["user"] for m in humans}
-            last_ts = humans[-1]["ts"] if humans else 0.0
-            already = _chat_consumed_ts["ts"]
-        if len(distinct) < 2 or last_ts <= already:
-            return
+    humans = chat_service.humans(LOCAL_CHANNEL)
+    distinct = {m["user"] for m in humans}
+    last_ts = humans[-1]["ts"] if humans else 0.0
+    already = chat_service.get_state(LOCAL_CHANNEL)["consumed_ts"]
+    if len(distinct) < 2 or last_ts <= already:
+        return
 
-        transcript = "\n".join(f"{m['user']}: {m['text']}" for m in humans[-25:])
-        try:
-            consensus = detect_consensus(transcript, LLMClient())
-        except Exception:  # noqa: BLE001 - detection failure shouldn't crash chat
-            return
-        if not (consensus.ready and consensus.task):
-            # #3 No agreement yet — but has the discussion surfaced concrete
-            # work? If so, propose filing a ticket (once per new discussion).
-            _maybe_suggest_ticket(transcript, last_ts)
-            return
+    transcript = "\n".join(f"{m['user']}: {m['text']}" for m in humans[-25:])
+    try:
+        consensus = detect_consensus(transcript, LLMClient())
+    except Exception:  # noqa: BLE001 - detection failure shouldn't crash chat
+        return
+    if not (consensus.ready and consensus.task):
+        # #3 No agreement yet — but has the discussion surfaced concrete
+        # work? If so, propose filing a ticket (once per new discussion).
+        _maybe_suggest_ticket(transcript, last_ts)
+        return
 
-        with _chat_lock:
-            _chat_consumed_ts["ts"] = last_ts  # consume this agreement
+    # Atomically claim this agreement. If we don't win the claim, another worker
+    # already fired for this message — bail so the PR opens exactly once.
+    if not chat_service.claim(LOCAL_CHANNEL, last_ts):
+        return
 
     who = " and ".join(consensus.agreers) if consensus.agreers else "the team"
     _chat_append(
@@ -300,10 +294,8 @@ def _ci_message(summary: dict) -> str:
 # consensus to ship is scoped to exactly those two people (both must agree),
 # which makes "two people agreed" a real authorization signal. Each ticket
 # gets its own discussion channel (in-app for now; real Slack later).
-_ticket_chat_lock = threading.Lock()
-_ticket_messages: dict[str, list[dict]] = {}  # ticket_id -> messages
-_ticket_consumed: dict[str, float] = {}  # ticket_id -> last consumed human ts
-_ticket_questions_asked: dict[str, int] = {}  # ticket_id -> readiness questions asked
+# Ticket discussion channels are persisted in Postgres (chat_service), keyed by
+# the ticket id, with the consensus cursor + questions-asked count alongside.
 
 # Readiness gate: ask at most this many clarifying questions, then just build
 # with what's known so the agent can't loop forever asking.
@@ -387,23 +379,13 @@ def start_ticket(ticket_id: str) -> dict:
 def _ticket_chat_append(
     ticket_id: str, user: str, text: str, *, is_bot: bool, pr_url: str | None = None
 ) -> None:
-    with _ticket_chat_lock:
-        _ticket_messages.setdefault(ticket_id, []).append(
-            {
-                "user": user,
-                "text": text,
-                "ts": time.time(),
-                "is_bot": is_bot,
-                "pr_url": pr_url,
-            }
-        )
+    chat_service.append_message(ticket_id, user, text, is_bot=is_bot, pr_url=pr_url)
 
 
 @app.get("/tickets/{ticket_id}/messages")
 def ticket_messages(ticket_id: str) -> dict:
     _ticket_or_404(ticket_id)
-    with _ticket_chat_lock:
-        return {"messages": list(_ticket_messages.get(ticket_id, []))}
+    return {"messages": chat_service.list_messages(ticket_id)}
 
 
 @app.post("/tickets/{ticket_id}/send")
@@ -425,65 +407,62 @@ def ticket_send(ticket_id: str, req: TicketChatSend) -> dict[str, bool]:
             ),
         )
     _ticket_chat_append(ticket_id, user, text, is_bot=False)
-    threading.Thread(
-        target=_ticket_consensus_check, args=(ticket_id,), daemon=True
-    ).start()
+    _consensus_pool.submit(_ticket_consensus_check, ticket_id)
     return {"ok": True}
 
 
 def _ticket_consensus_check(ticket_id: str) -> None:
     """Fire the agent when BOTH the assignee and reporter have agreed."""
-    with _consensus_lock:  # one consensus run at a time (shared with local chat)
-        ticket = tickets_service.get_ticket(uuid.UUID(ticket_id))
-        if ticket is None:
-            return
-        members = {ticket["assignee"], ticket["reporter"]}
-        with _ticket_chat_lock:
-            msgs = _ticket_messages.get(ticket_id, [])
-            humans = [m for m in msgs if not m["is_bot"]]
-            last_ts = humans[-1]["ts"] if humans else 0.0
-            already = _ticket_consumed.get(ticket_id, 0.0)
-        # Both named people must have posted, and there must be something new.
-        posted = {m["user"] for m in humans}
-        both_present = all(
-            any(p.lower() == m.lower() for p in posted) for m in members
-        )
-        if not both_present or last_ts <= already:
-            return
+    ticket = tickets_service.get_ticket(uuid.UUID(ticket_id))
+    if ticket is None:
+        return
+    members = {ticket["assignee"], ticket["reporter"]}
+    humans = chat_service.humans(ticket_id)
+    last_ts = humans[-1]["ts"] if humans else 0.0
+    state = chat_service.get_state(ticket_id)
+    already = state["consumed_ts"]
+    # Both named people must have posted, and there must be something new.
+    posted = {m["user"] for m in humans}
+    both_present = all(
+        any(p.lower() == m.lower() for p in posted) for m in members
+    )
+    if not both_present or last_ts <= already:
+        return
 
-        transcript = "\n".join(f"{m['user']}: {m['text']}" for m in humans[-25:])
-        try:
-            consensus = detect_consensus(transcript, LLMClient())
-        except Exception:  # noqa: BLE001 - detection failure shouldn't crash chat
-            return
-        if not (consensus.ready and consensus.task):
-            return
+    transcript = "\n".join(f"{m['user']}: {m['text']}" for m in humans[-25:])
+    try:
+        consensus = detect_consensus(transcript, LLMClient())
+    except Exception:  # noqa: BLE001 - detection failure shouldn't crash chat
+        return
+    if not (consensus.ready and consensus.task):
+        return
 
-        # #4 Readiness gate: is the agreed task concrete enough to build? If
-        # not, ask ONE clarifying question and DON'T consume the agreement, so
-        # the team can answer and re-trigger. But cap it: at most
-        # _MAX_READINESS_QUESTIONS, and skip entirely if anyone said "no further
-        # questions" — then build with what's in the ticket/chat. This stops the
-        # agent looping on clarifications forever.
-        with _ticket_chat_lock:
-            asked = _ticket_questions_asked.get(ticket_id, 0)
-        skip_gate = _wants_to_skip_questions(humans) or asked >= _MAX_READINESS_QUESTIONS
-        if not skip_gate:
-            readiness = assist.judge_readiness(consensus.task, transcript)
-            if not readiness.ready:
-                with _ticket_chat_lock:
-                    _ticket_consumed[ticket_id] = last_ts  # avoid re-asking every poll
-                    _ticket_questions_asked[ticket_id] = asked + 1
+    # #4 Readiness gate: is the agreed task concrete enough to build? If
+    # not, ask ONE clarifying question and DON'T consume the agreement, so
+    # the team can answer and re-trigger. But cap it: at most
+    # _MAX_READINESS_QUESTIONS, and skip entirely if anyone said "no further
+    # questions" — then build with what's in the ticket/chat. This stops the
+    # agent looping on clarifications forever.
+    asked = state["questions_asked"]
+    skip_gate = _wants_to_skip_questions(humans) or asked >= _MAX_READINESS_QUESTIONS
+    if not skip_gate:
+        readiness = assist.judge_readiness(consensus.task, transcript)
+        if not readiness.ready:
+            # Claim (advance cursor + count the question) so we don't re-ask on
+            # every poll. If another worker already claimed, stay quiet.
+            if chat_service.claim(ticket_id, last_ts, increment_question=True):
                 _ticket_chat_append(
                     ticket_id,
                     "Brain OS Agent",
                     f"🤔 Before I build this, one question: {readiness.question}",
                     is_bot=True,
                 )
-                return
+            return
 
-        with _ticket_chat_lock:
-            _ticket_consumed[ticket_id] = last_ts  # consume this agreement
+    # Atomically claim this agreement. Losing the claim means another worker is
+    # already building for this message — bail so the PR opens exactly once.
+    if not chat_service.claim(ticket_id, last_ts):
+        return
 
     # Build from the ticket description as the source of truth, with the agreed
     # chat task as extra context. This keeps the agent grounded in what the
@@ -598,9 +577,8 @@ def complete_ticket(ticket_id: str, require_merge: bool = False) -> dict:
                 status_code=409, detail="PR is not merged yet — cannot close."
             )
 
-    # Build the transcript from the (in-memory) channel messages.
-    with _ticket_chat_lock:
-        msgs = list(_ticket_messages.get(ticket_id, []))
+    # Build the transcript from the channel's persisted messages.
+    msgs = chat_service.list_messages(ticket_id)
     transcript = "\n".join(
         f"{m['user']}: {m['text']}" for m in msgs if m.get("text")
     )
@@ -615,11 +593,8 @@ def complete_ticket(ticket_id: str, require_merge: bool = False) -> dict:
         data=report.raw,
     )
 
-    # Tear down the channel: wipe its messages and detach it, then close ticket.
-    with _ticket_chat_lock:
-        _ticket_messages.pop(ticket_id, None)
-        _ticket_consumed.pop(ticket_id, None)
-        _ticket_questions_asked.pop(ticket_id, None)
+    # Tear down the channel: wipe its messages + consensus state, close ticket.
+    chat_service.clear_channel(ticket_id)
     tickets_service.close_ticket(rid)
     return saved
 

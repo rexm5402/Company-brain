@@ -28,6 +28,7 @@ from app.audit.recorder import ToolResult
 from app.config import get_settings
 from app.tools.base import Tool
 from app.tools.context import RunContext
+from app.tools.validation import validate_files
 
 _API = "https://api.github.com"
 # GitHub Contents API only inlines file content up to ~1MB.
@@ -250,12 +251,23 @@ class OpenPullRequestTool(_GitHubTool):
         if not self._repo:
             return ToolResult(success=False, error="GITHUB_REPO is not configured.")
 
-        # --- Local validation (no API calls, no side effects) ---
+        # --- Local validation (no side effects on the repo) ---
         syntax_errors = self._validate_syntax(files)
         if syntax_errors:
             return ToolResult(
                 success=False,
                 error="Fix these before opening a PR: " + "; ".join(syntax_errors),
+            )
+        # Deeper pre-PR gate (lint / install+test, per PREPR_VALIDATION). Catches
+        # bugs that still parse, so we open green PRs instead of relying solely on
+        # reactive iterate-on-red. Returns the problems for the agent to fix.
+        validation = validate_files(files)
+        if not validation.passed:
+            return ToolResult(
+                success=False,
+                error="Pre-PR validation failed; fix and resubmit. "
+                + "; ".join(validation.errors),
+                output={"validation_log": validation.log[:4000]} if validation.log else None,
             )
 
         try:

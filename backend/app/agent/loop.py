@@ -28,6 +28,9 @@ class AgentRun:
     steps: int = 0
     committed_branch: str | None = None  # set in fix_mode after commit_to_branch
     transcript: list[dict[str, Any]] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    model: str = ""
 
 
 def run_agent(
@@ -45,7 +48,7 @@ def run_agent(
     system = FIX_SYSTEM_PROMPT if fix_mode else SYSTEM_PROMPT
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
-    run = AgentRun(run_id=run_id)
+    run = AgentRun(run_id=run_id, model=llm._model)
 
     for step in range(1, max_steps + 1):
         run.steps = step
@@ -54,6 +57,9 @@ def run_agent(
         except Exception as exc:  # provider error after retries -> end cleanly
             run.final_text = f"LLM call failed: {type(exc).__name__}: {exc}"
             break
+
+        run.prompt_tokens += response.prompt_tokens
+        run.completion_tokens += response.completion_tokens
 
         if response.text:
             run.transcript.append({"step": step, "reasoning": response.text})
