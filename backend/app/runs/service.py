@@ -52,7 +52,14 @@ def create_run(task: str) -> uuid.UUID:
     return run_id
 
 
-def run_sync(task: str):
+def run_sync(
+    task: str,
+    *,
+    ticket_id: Optional[uuid.UUID] = None,
+    repo_slug: Optional[str] = None,
+    token: Optional[str] = None,
+    repo_id: Optional[str] = None,
+):
     """Run the agent synchronously, recording a run row the dashboard can see.
 
     Used by the Slack consensus listener, which needs the result inline (to post
@@ -64,7 +71,14 @@ def run_sync(task: str):
         session.add(RunRecord(id=run_id, task=task, status="running"))
         session.commit()
     try:
-        result = run_agent(task, run_id=run_id)
+        result = run_agent(
+            task,
+            run_id=run_id,
+            ticket_id=ticket_id,
+            repo_slug=repo_slug,
+            token=token,
+            repo_id=repo_id,
+        )
         cost = estimate_cost(result.model, result.prompt_tokens, result.completion_tokens)
         _update(
             run_id,

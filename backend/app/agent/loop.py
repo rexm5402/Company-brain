@@ -17,7 +17,7 @@ from app.audit.recorder import ToolResult, record_tool_call
 from app.tools.context import RunContext
 from app.tools.registry import build_registry
 
-MAX_STEPS = 8
+MAX_STEPS = 14  # extra steps for: Sentry lookup, test runs (up to 2), doc+test file writes
 
 
 @dataclass
@@ -31,6 +31,7 @@ class AgentRun:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     model: str = ""
+    ticket_id: uuid.UUID | None = None
 
 
 def run_agent(
@@ -39,16 +40,26 @@ def run_agent(
     run_id: uuid.UUID | None = None,
     max_steps: int = MAX_STEPS,
     fix_mode: bool = False,
+    ticket_id: uuid.UUID | None = None,
+    repo_slug: str | None = None,
+    token: str | None = None,
+    repo_id: str | None = None,
 ) -> AgentRun:
     run_id = run_id or uuid.uuid4()
     llm = LLMClient()
     ctx = RunContext()
-    registry = build_registry(ctx, fix_mode=fix_mode)
+    registry = build_registry(
+        ctx,
+        fix_mode=fix_mode,
+        repo_slug=repo_slug,
+        token=token,
+        repo_id=repo_id,
+    )
     tool_schemas = [t.schema() for t in registry.values()]
     system = FIX_SYSTEM_PROMPT if fix_mode else SYSTEM_PROMPT
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
-    run = AgentRun(run_id=run_id, model=llm._model)
+    run = AgentRun(run_id=run_id, model=llm._model, ticket_id=ticket_id)
 
     for step in range(1, max_steps + 1):
         run.steps = step
@@ -79,6 +90,17 @@ def run_agent(
             result = _dispatch(run_id, step, registry, tc)
             if result.success and result.output and "pr_url" in result.output:
                 run.pr_url = result.output["pr_url"]
+                if run.ticket_id is not None:
+                    try:
+                        from app.deployments import service as deploy_svc
+                        deploy_svc.trigger_deploy(
+                            run.ticket_id,
+                            run.pr_url,
+                            result.output.get("branch", ""),
+                            result.output.get("repo", ""),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
             if (
                 tc.name == "commit_to_branch"
                 and result.success

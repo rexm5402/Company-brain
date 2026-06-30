@@ -29,9 +29,11 @@ def _serialize(t: Ticket) -> dict[str, Any]:
         "status": t.status,
         "assignee": t.assignee,
         "reporter": t.reporter,
+        "source": t.source,
         "details": t.details,
         "channel": t.channel,
         "pr_url": t.pr_url,
+        "repo_id": str(t.repo_id) if t.repo_id else None,
         "created_at": t.created_at.isoformat(),
         "updated_at": t.updated_at.isoformat(),
     }
@@ -44,7 +46,12 @@ def _next_key(session) -> str:
 
 
 def create_ticket(
-    title: str, description: str, assignee: str, reporter: str
+    title: str,
+    description: str,
+    assignee: str,
+    reporter: str,
+    source: str = "manual",
+    repo_id: Optional[uuid.UUID] = None,
 ) -> dict[str, Any]:
     title = title.strip()
     assignee = assignee.strip()
@@ -70,8 +77,10 @@ def create_ticket(
             description=description.strip(),
             assignee=assignee,
             reporter=reporter,
+            source=source,
             status="open",
             details=details,
+            repo_id=repo_id,
         )
         session.add(ticket)
         session.commit()
@@ -89,6 +98,12 @@ def list_tickets() -> list[dict[str, Any]]:
 def get_ticket(ticket_id: uuid.UUID) -> Optional[dict[str, Any]]:
     with SessionLocal() as session:
         t = session.get(Ticket, ticket_id)
+        return _serialize(t) if t else None
+
+
+def get_by_pr_url(pr_url: str) -> Optional[dict[str, Any]]:
+    with SessionLocal() as session:
+        t = session.scalar(select(Ticket).where(Ticket.pr_url == pr_url))
         return _serialize(t) if t else None
 
 

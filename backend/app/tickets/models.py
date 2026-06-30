@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import sqlalchemy as sa
 from sqlalchemy import DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -49,10 +50,20 @@ class Ticket(Base):
     # AI-enriched expansion (summary + acceptance criteria), rendered markdown.
     details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Where the ticket came from: human via the UI, or the watchdog pipeline.
+    source: Mapped[str] = mapped_column(
+        String(40), default="manual", server_default="manual"
+    )
+
     # Set once the ticket's discussion channel is opened.
     channel: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     # Set once the agent opens a PR for this ticket.
     pr_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Optional link to the repo this ticket is scoped to.
+    repo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.Uuid(as_uuid=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()

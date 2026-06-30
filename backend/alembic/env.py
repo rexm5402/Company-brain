@@ -19,6 +19,9 @@ from app.runs import models as _runs_models  # noqa: F401
 from app.tickets import models as _tickets_models  # noqa: F401
 from app.reports import models as _reports_models  # noqa: F401
 from app.chat import models as _chat_models  # noqa: F401
+from app.users import models as _users_models  # noqa: F401
+from app.watchdog import models as _watchdog_models  # noqa: F401
+from app.notifications import models as _notif_models  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().database_url)

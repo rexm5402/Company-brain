@@ -38,13 +38,14 @@ _MAX_INLINE_BYTES = 1_000_000
 class _GitHubTool(Tool):
     """Shared GitHub config (repo, base branch, auth headers)."""
 
-    def __init__(self, ctx: RunContext) -> None:
+    def __init__(self, ctx: RunContext, *, repo: str | None = None, token: str | None = None) -> None:
         s = get_settings()
         self.ctx = ctx
-        self._repo = s.github_repo
+        self._repo = repo or s.github_repo
         self._base = s.github_base_branch
+        _token = token or s.github_token
         self._headers = {
-            "Authorization": f"Bearer {s.github_token}",
+            "Authorization": f"Bearer {_token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
@@ -69,31 +70,43 @@ class _GitHubTool(Tool):
 class GetFileContentsTool(_GitHubTool):
     name = "get_file_contents"
     description = (
-        "Read the current contents of a file from the base branch BEFORE you "
-        "modify it. Returns the full text and a sha. You must call this for any "
-        "existing file you intend to change, then supply the complete updated "
-        "file to open_pull_request. Returns exists=false for new paths."
+        "Read the contents of a file from the repository. "
+        "By default reads from the base branch (current HEAD). "
+        "Pass an optional 'ref' (commit SHA or branch name) to read the file "
+        "as it existed at a specific point in time — use this for the Time Machine "
+        "debugger to see the exact code that was live when a production error occurred. "
+        "You must call this for any existing file you intend to change before "
+        "supplying the complete updated file to open_pull_request."
     )
     parameters = {
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Repo-relative file path, e.g. 'README.md'.",
-            }
+                "description": "Repo-relative file path, e.g. 'app/auth.py'.",
+            },
+            "ref": {
+                "type": "string",
+                "description": (
+                    "Git ref to read from: a commit SHA, branch name, or tag. "
+                    "Omit to read the current base branch (default). "
+                    "Use the commit SHA from a Sentry/CI event to read historical code."
+                ),
+            },
         },
         "required": ["path"],
     }
 
     def run(self, **kwargs: Any) -> ToolResult:
         path = kwargs["path"]
+        ref = kwargs.get("ref") or self._base
         if not self._repo:
             return ToolResult(success=False, error="GITHUB_REPO is not configured.")
         try:
             with self._client() as client:
                 r = client.get(
                     f"{_API}/repos/{self._repo}/contents/{path}",
-                    params={"ref": self._base},
+                    params={"ref": ref},
                 )
                 if r.status_code == 404:
                     return ToolResult(
@@ -141,11 +154,22 @@ class GetFileContentsTool(_GitHubTool):
                 },
             )
 
-        # Only a successful TEXT read counts toward the read-before-write guard.
-        self.ctx.record_read(path, data["sha"])
+        # Only reads from the CURRENT base branch count toward the read-before-write
+        # guard. Historical reads (Time Machine: ref = a past commit SHA) are for
+        # context only — the guard should still require a current read before writing.
+        is_current = (ref == self._base)
+        if is_current:
+            self.ctx.record_read(path, data["sha"])
         return ToolResult(
             success=True,
-            output={"path": path, "exists": True, "sha": data["sha"], "content": content},
+            output={
+                "path": path,
+                "exists": True,
+                "sha": data["sha"],
+                "content": content,
+                "ref": ref,
+                "is_historical": not is_current,
+            },
         )
 
 
@@ -308,6 +332,7 @@ class OpenPullRequestTool(_GitHubTool):
                 "pr_number": pr["number"],
                 "pr_url": pr["html_url"],
                 "branch": branch,
+                "repo": self._repo,
                 "files_changed": [f["path"] for f in files],
             },
         )
@@ -726,3 +751,59 @@ class CommentOnPRTool(_GitHubTool):
             success=True,
             output={"comment_id": data["id"], "url": data["html_url"]},
         )
+
+
+def get_pr_comments(
+    pr_number: int,
+    *,
+    repo_slug: str | None = None,
+    token: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch all review + issue comments for a PR, sorted by created_at."""
+    s = get_settings()
+    repo = repo_slug or s.github_repo
+    if not repo:
+        return []
+    _token = token or s.github_token
+    headers = {
+        "Authorization": f"Bearer {_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    comments: list[dict[str, Any]] = []
+    try:
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            # Pull request review comments (line-level)
+            r1 = client.get(
+                f"{_API}/repos/{repo}/pulls/{pr_number}/comments",
+                params={"per_page": 100},
+            )
+            if r1.status_code == 200:
+                for c in r1.json():
+                    comments.append({
+                        "id": c.get("id"),
+                        "user": (c.get("user") or {}).get("login"),
+                        "body": c.get("body"),
+                        "created_at": c.get("created_at"),
+                        "type": "review_comment",
+                        "url": c.get("html_url"),
+                    })
+            # Issue comments (general PR comments)
+            r2 = client.get(
+                f"{_API}/repos/{repo}/issues/{pr_number}/comments",
+                params={"per_page": 100},
+            )
+            if r2.status_code == 200:
+                for c in r2.json():
+                    comments.append({
+                        "id": c.get("id"),
+                        "user": (c.get("user") or {}).get("login"),
+                        "body": c.get("body"),
+                        "created_at": c.get("created_at"),
+                        "type": "issue_comment",
+                        "url": c.get("html_url"),
+                    })
+    except httpx.HTTPError:
+        return []
+    comments.sort(key=lambda c: c.get("created_at") or "")
+    return comments

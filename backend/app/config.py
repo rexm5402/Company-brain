@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     github_repo: str = ""
     github_base_branch: str = "main"
 
+    # Token optimisation via Headroom (https://headroomlabs-ai.github.io/headroom/)
+    # Compresses tool outputs + conversation history before each LLM call.
+    # Set to false only if you need to debug raw token counts.
+    headroom_enabled: bool = True
+
     # Pre-PR validation gate. Before opening a PR we materialize the proposed
     # files over a fresh checkout of the base branch and check them:
     #   off  - syntax check only (the historical behavior)
@@ -43,6 +48,32 @@ class Settings(BaseSettings):
     # Slack (Weekend 2)
     slack_bot_token: str = ""
     slack_watch_channel: str = ""  # channel name (e.g. #all-new-workspace) or ID
+
+    # Sentry APM — optional; enables the get_recent_errors agent tool
+    # Create an internal integration token at sentry.io → Settings → Integrations
+    sentry_auth_token: str = ""
+    sentry_org: str = ""      # organisation slug, e.g. "acme-corp"
+    sentry_project: str = ""  # project slug, e.g. "backend"
+
+    # Webhook secrets — used to verify inbound payloads are genuine
+    # Sentry: Settings → Developer Settings → Internal Integration → Client Secret
+    sentry_webhook_secret: str = ""
+    # GitHub: set when registering the webhook on your repo/org (any string you choose)
+    github_webhook_secret: str = ""
+
+    # Watchdog defaults
+    # GitHub username to assign watchdog tickets when CODEOWNERS has no match
+    watchdog_default_assignee: str = ""
+    # GitHub username reported as the "reporter" on all watchdog-created tickets
+    watchdog_reporter: str = "watchdog"
+    # Slack channel to post incident notifications to (e.g. "#incidents")
+    watchdog_slack_channel: str = ""
+
+    # Ephemeral staging environments — webhook to trigger a deploy on PR open
+    deploy_webhook_url: str = ""
+
+    # OpenAI API key for pgvector embeddings (Feature 3: repo memory)
+    openai_api_key: str = ""
 
 
 @lru_cache

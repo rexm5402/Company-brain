@@ -28,14 +28,21 @@ from app.runs import service as runs_service
 from app.slack.client import SlackClient, SlackError
 from app.slack.detector import detect_consensus
 from app.ai import assist
+from app.ai.debate import run_debate
 from app.reports import service as reports_service
+from app.repos import service as repos_service
 from app.tickets import service as tickets_service
 from app.tickets.service import TicketError
-from app.tools.github_tool import get_pr_file_paths, get_pr_state
+from app.deployments import service as deployments_service
+from app.tools.github_tool import get_pr_file_paths, get_pr_state, get_pr_comments
+from app.notifications import service as notif_service
+from app.users import service as users_service
+from app.watchdog.webhooks import router as webhooks_router
 
 init_observability()
 
 app = FastAPI(title="Company Brain OS — Engineering Agent", version="0.1.0")
+app.include_router(webhooks_router)
 
 # Active channel the dashboard/listener is pointed at. Defaults to the
 # configured watch channel; switchable at runtime via POST /slack/channel.
@@ -329,6 +336,7 @@ class TicketCreate(BaseModel):
     description: str = ""
     assignee: str
     reporter: str
+    repo_id: str | None = None
 
 
 class TicketChatSend(BaseModel):
@@ -350,8 +358,10 @@ def _ticket_or_404(ticket_id: str) -> dict:
 @app.post("/tickets")
 def create_ticket(req: TicketCreate) -> dict:
     try:
+        repo_id = uuid.UUID(req.repo_id) if req.repo_id else None
         return tickets_service.create_ticket(
-            req.title, req.description, req.assignee, req.reporter
+            req.title, req.description, req.assignee, req.reporter,
+            repo_id=repo_id,
         )
     except TicketError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -475,6 +485,30 @@ def _ticket_consensus_check(ticket_id: str) -> None:
             f"Agreed change to implement:\n{consensus.task}"
         )
 
+    # Feature 4 — Multi-Agent Spec Debate: for complex tickets, three specialist
+    # agents (Security, Database, Frontend) debate the approach before any code
+    # is written. The resulting TechSpec is prepended to the build task so the
+    # engineering agent codes with the collective reasoning baked in.
+    try:
+        spec = run_debate(ticket, transcript)
+        if not spec.skipped:
+            spec_md = spec.to_markdown()
+            if spec_md:
+                build_task = spec_md + build_task
+                # Surface highest risk level from the debate in chat
+                risk_levels = [op.risk_level for op in spec.opinions]
+                highest = "high" if "high" in risk_levels else ("medium" if "medium" in risk_levels else "low")
+                icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(highest, "🟢")
+                _ticket_chat_append(
+                    ticket_id,
+                    "Brain OS Agent",
+                    f"{icon} **Pre-build debate complete.** Security, Database, and Frontend agents reviewed this ticket.\n"
+                    f"Highest risk: {highest}. Tech spec injected into the build task.",
+                    is_bot=True,
+                )
+    except Exception:  # noqa: BLE001 — debate failure must never block the build
+        pass
+
     _ticket_chat_append(
         ticket_id,
         "Brain OS Agent",
@@ -482,8 +516,29 @@ def _ticket_consensus_check(ticket_id: str) -> None:
         f"both agreed. Implementing now:\n{consensus.task}",
         is_bot=True,
     )
+    # Look up repo for this ticket so the agent uses the right repo/token
+    _repo_slug: str | None = None
+    _token: str | None = None
+    _repo_id_str: str | None = None
+    if ticket.get("repo_id"):
+        try:
+            _repo = repos_service.get_repo(uuid.UUID(ticket["repo_id"]))
+            if _repo:
+                _repo_slug = _repo["slug"]
+                _repo_id_str = ticket["repo_id"]
+                from app.repos.service import get_repo_token
+                _token = get_repo_token(_repo["slug"])
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
-        run = runs_service.run_sync(build_task)
+        run = runs_service.run_sync(
+            build_task,
+            ticket_id=uuid.UUID(ticket_id),
+            repo_slug=_repo_slug,
+            token=_token,
+            repo_id=_repo_id_str,
+        )
     except Exception as exc:  # noqa: BLE001 - surface failure in the chat
         _ticket_chat_append(
             ticket_id, "Brain OS Agent", f"⚠️ {type(exc).__name__}: {exc}", is_bot=True
@@ -628,6 +683,55 @@ def _risk_message(risk: assist.Risk) -> str:
     return base
 
 
+# --- Users --------------------------------------------------------------
+# Lightweight team-member registry. The watchdog uses this to resolve
+# CODEOWNERS entries to assignees. Seeded manually until GitHub OAuth lands.
+
+class UserCreate(BaseModel):
+    github_username: str
+    display_name: str = ""
+    slack_user_id: str = ""
+
+
+@app.get("/users")
+def list_users() -> list[dict]:
+    return users_service.list_users()
+
+
+@app.post("/users")
+def create_user(req: UserCreate) -> dict:
+    return users_service.upsert_user(
+        github_username=req.github_username,
+        display_name=req.display_name or req.github_username,
+        slack_user_id=req.slack_user_id or None,
+    )
+
+
+@app.get("/webhook-events")
+def list_webhook_events(limit: int = 50) -> list[dict]:
+    """Recent inbound webhook events (for the dashboard / debugging)."""
+    from sqlalchemy import select as sa_select, desc
+    from app.watchdog.models import WebhookEvent
+    with __import__("app.db", fromlist=["SessionLocal"]).SessionLocal() as session:
+        rows = session.scalars(
+            sa_select(WebhookEvent)
+            .order_by(desc(WebhookEvent.processed_at))
+            .limit(limit)
+        ).all()
+        return [
+            {
+                "id": str(r.id),
+                "source": r.source,
+                "event_type": r.event_type,
+                "external_id": r.external_id,
+                "ticket_id": str(r.ticket_id) if r.ticket_id else None,
+                "error": r.error,
+                "processed_at": r.processed_at.isoformat(),
+            }
+            for r in rows
+        ]
+
+
 @app.post("/runs")
 def create_run(req: RunRequest) -> dict[str, str]:
     if not req.task.strip():
@@ -669,6 +773,187 @@ def audit_for_run(run_id: str, session: Session = Depends(get_session)) -> list[
         }
         for r in rows
     ]
+
+
+# --- Notifications ------------------------------------------------------
+
+@app.get("/notifications")
+def get_notifications(user: str, unread_only: bool = False, limit: int = 50) -> list[dict]:
+    return notif_service.list_for_user(user, unread_only=unread_only, limit=limit)
+
+
+@app.get("/notifications/count")
+def notification_count(user: str) -> dict[str, int]:
+    return {"unread": notif_service.unread_count(user)}
+
+
+@app.post("/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str) -> dict[str, bool]:
+    try:
+        nid = uuid.UUID(notification_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not found")
+    ok = notif_service.mark_read(nid)
+    if not ok:
+        raise HTTPException(status_code=404, detail="not found")
+    return {"ok": True}
+
+
+@app.post("/notifications/read-all")
+def mark_all_notifications_read(user: str) -> dict[str, int]:
+    count = notif_service.mark_all_read(user)
+    return {"marked": count}
+
+
+# --- Repos --------------------------------------------------------------
+
+class RepoCreate(BaseModel):
+    name: str
+    owner: str
+    slug: str
+    github_token_override: str | None = None
+
+
+@app.get("/repos")
+def list_repos() -> list[dict]:
+    return repos_service.list_repos()
+
+
+@app.post("/repos")
+def create_repo(req: RepoCreate) -> dict:
+    try:
+        return repos_service.create_repo(
+            req.name, req.owner, req.slug, req.github_token_override
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.get("/repos/{repo_id}")
+def get_repo(repo_id: str) -> dict:
+    try:
+        rid = uuid.UUID(repo_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="repo not found")
+    repo = repos_service.get_repo(rid)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="repo not found")
+    return repo
+
+
+@app.post("/repos/{repo_id}/index")
+def index_repo_docs(repo_id: str) -> dict:
+    """Trigger indexing of repo docs into pgvector."""
+    try:
+        rid = uuid.UUID(repo_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="repo not found")
+    repo = repos_service.get_repo(rid)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="repo not found")
+    try:
+        from app.memory import indexer
+        count = indexer.index_repo(rid)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"chunks": count}
+
+
+# --- Deployments --------------------------------------------------------
+
+@app.get("/tickets/{ticket_id}/deployments")
+def ticket_deployments(ticket_id: str) -> list[dict]:
+    _ticket_or_404(ticket_id)
+    return deployments_service.list_for_ticket(uuid.UUID(ticket_id))
+
+
+# --- PR Comments --------------------------------------------------------
+
+@app.get("/tickets/{ticket_id}/pr-comments")
+def ticket_pr_comments(ticket_id: str) -> list[dict]:
+    ticket = _ticket_or_404(ticket_id)
+    pr_url = ticket.get("pr_url")
+    if not pr_url:
+        return []
+    # Extract PR number from URL
+    try:
+        pr_number = int(pr_url.rstrip("/").split("/")[-1])
+    except (ValueError, IndexError):
+        return []
+    return get_pr_comments(pr_number)
+
+
+# --- SSE: live agent step streaming ------------------------------------
+# Streams AuditLog rows for a run as server-sent events. The frontend
+# subscribes when a run starts and gets real-time tool-call updates without
+# polling. Each SSE event is JSON: {"step": N, "tool": "...", "success": bool, ...}
+
+import asyncio
+import json as _json
+from fastapi.responses import StreamingResponse
+
+
+@app.get("/runs/{run_id}/stream")
+async def stream_run(run_id: str) -> StreamingResponse:
+    """SSE stream of audit events for a run. Closes when run reaches terminal state."""
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    async def event_generator():
+        seen_steps: set[int] = set()
+        idle_ticks = 0
+        max_idle = 60   # ~30s with 0.5s sleep; close if run stops progressing
+
+        while idle_ticks < max_idle:
+            run = runs_service.get_run(rid)
+            if run is None:
+                yield "event: error\ndata: {\"error\": \"run not found\"}\n\n"
+                return
+
+            # Fetch new audit rows
+            with __import__("app.db", fromlist=["SessionLocal"]).SessionLocal() as session:
+                rows = session.scalars(
+                    select(AuditLog)
+                    .where(AuditLog.run_id == str(rid))
+                    .order_by(AuditLog.step)
+                ).all()
+
+            new_rows = [r for r in rows if r.step not in seen_steps]
+            for r in new_rows:
+                seen_steps.add(r.step)
+                idle_ticks = 0
+                data = _json.dumps({
+                    "step": r.step,
+                    "tool": r.tool_name,
+                    "success": r.success,
+                    "latency_ms": r.latency_ms,
+                    "error": r.error,
+                    "created_at": r.created_at.isoformat(),
+                })
+                yield f"event: step\ndata: {data}\n\n"
+
+            status = run.get("status", "")
+            if status in ("done", "failed"):
+                yield f"event: done\ndata: {{\"status\": \"{status}\"}}\n\n"
+                return
+
+            if not new_rows:
+                idle_ticks += 1
+
+            await asyncio.sleep(0.5)
+
+        yield "event: timeout\ndata: {}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # Serve the dashboard last so explicit API routes above take precedence.

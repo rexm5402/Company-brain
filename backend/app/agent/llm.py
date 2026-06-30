@@ -4,15 +4,55 @@ The rest of the codebase only talks to `LLMClient.chat(...)` and gets back a
 normalized `LLMResponse`. Groq (OpenAI-compatible) and Anthropic have different
 tool-calling schemas, so all of that divergence is contained here. Switching
 providers is a one-env-var change (LLM_PROVIDER).
+
+Token optimisation: when `HEADROOM_ENABLED=true` (the default) and the
+`headroom-ai` package is available (Python 3.10+), the underlying SDK client is
+wrapped with HeadroomClient before any LLM call. Headroom compresses tool
+outputs, large file contents, and long conversation histories, typically
+achieving 60-90% token savings on the bulky context that dominates agent runs
+(file reads, CI logs, search results). The wrapper is fully transparent — same
+API surface, fewer tokens sent.
+
+On Python 3.9 (local dev venv) headroom-ai can't be installed so the import
+fails gracefully and the unwrapped client is used. In Docker (Python 3.11) and
+CI it's active automatically.
 """
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+def _wrap_with_headroom(client: Any, provider: str) -> Any:
+    """Return a HeadroomClient-wrapped version of `client`, or the original on failure."""
+    if not get_settings().headroom_enabled:
+        return client
+    try:
+        from headroom import HeadroomClient, OpenAIProvider, AnthropicProvider  # type: ignore
+
+        if provider == "groq":
+            wrapped = HeadroomClient(
+                original_client=client,
+                provider=OpenAIProvider(),
+                default_mode="optimize",
+            )
+        else:
+            wrapped = HeadroomClient(
+                original_client=client,
+                provider=AnthropicProvider(),
+                default_mode="optimize",
+            )
+        logger.info("Headroom token optimisation active for provider=%s", provider)
+        return wrapped
+    except Exception:  # noqa: BLE001 — Python <3.10, package missing, or any import error
+        return client  # silently fall back to unwrapped client
 
 
 @dataclass

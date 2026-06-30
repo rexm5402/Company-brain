@@ -58,6 +58,12 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     import app.tickets.models  # noqa: F401
     import app.reports.models  # noqa: F401
     import app.chat.models  # noqa: F401
+    import app.users.models  # noqa: F401
+    import app.watchdog.models  # noqa: F401
+    import app.notifications.models  # noqa: F401
+    import app.repos.models  # noqa: F401
+    import app.deployments.models  # noqa: F401
+    import app.memory.models  # noqa: F401
 
     Base.metadata.create_all(engine)
 
@@ -86,10 +92,18 @@ def rollback_after_test():
     import app.tickets.service as ts
     import app.reports.service as rs
     import app.chat.service as cs
+    import app.repos.service as repos_svc
+    import app.deployments.service as deploy_svc
+    import app.notifications.service as notif_svc
+    import app.watchdog.service as watchdog_svc
 
     ts.SessionLocal = TestSession
     rs.SessionLocal = TestSession
     cs.SessionLocal = TestSession
+    repos_svc.SessionLocal = TestSession
+    deploy_svc.SessionLocal = TestSession
+    notif_svc.SessionLocal = TestSession
+    watchdog_svc.SessionLocal = TestSession
 
     yield
 
@@ -97,6 +111,10 @@ def rollback_after_test():
     ts.SessionLocal = original_factory
     rs.SessionLocal = original_factory
     cs.SessionLocal = original_factory
+    repos_svc.SessionLocal = original_factory
+    deploy_svc.SessionLocal = original_factory
+    notif_svc.SessionLocal = original_factory
+    watchdog_svc.SessionLocal = original_factory
 
     transaction.rollback()
     connection.close()

@@ -16,25 +16,52 @@ from app.tools.github_tool import (
     ListRepoFilesTool,
     OpenPullRequestTool,
 )
+from app.tools.sentry_tool import GetRecentErrorsTool
 from app.tools.slack_tool import PostSlackMessageTool
+from app.tools.test_tool import RunTestsTool
 
 
-def build_registry(ctx: RunContext, *, fix_mode: bool = False) -> dict[str, Tool]:
+def build_registry(
+    ctx: RunContext,
+    *,
+    fix_mode: bool = False,
+    repo_slug: str | None = None,
+    token: str | None = None,
+    repo_id: str | None = None,
+) -> dict[str, Tool]:
     """Tools for a run.
 
     Normal runs open a PR. In fix_mode (iterate-on-red), the agent instead
     commits to the existing PR branch, so swap open_pull_request for
-    commit_to_branch.
+    commit_to_branch. run_tests is also excluded in fix_mode — CI is already
+    running on the existing branch.
     """
+    gh_kwargs: dict = {}
+    if repo_slug is not None:
+        gh_kwargs["repo"] = repo_slug
+    if token is not None:
+        gh_kwargs["token"] = token
+
     tools: list[Tool] = [
-        ListRepoFilesTool(ctx),
-        GetFileContentsTool(ctx),
-        CommentOnPRTool(ctx),
-        GetPRChecksTool(ctx),
+        ListRepoFilesTool(ctx, **gh_kwargs),
+        GetFileContentsTool(ctx, **gh_kwargs),
+        CommentOnPRTool(ctx, **gh_kwargs),
+        GetPRChecksTool(ctx, **gh_kwargs),
         PostSlackMessageTool(),
+        GetRecentErrorsTool(),
     ]
     if fix_mode:
-        tools.append(CommitToBranchTool(ctx))
+        tools.append(CommitToBranchTool(ctx, **gh_kwargs))
     else:
-        tools.append(OpenPullRequestTool(ctx))
+        tools.append(OpenPullRequestTool(ctx, **gh_kwargs))
+        tools.append(RunTestsTool())
+
+    # Feature 3: repo memory search (only when a repo_id is provided)
+    if repo_id is not None:
+        try:
+            from app.tools.search_repo_docs_tool import SearchRepoDocsTool
+            tools.append(SearchRepoDocsTool(ctx, repo_id=repo_id))
+        except Exception:  # noqa: BLE001
+            pass
+
     return {t.name: t for t in tools}
