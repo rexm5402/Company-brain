@@ -5,11 +5,12 @@ import { Bell } from "lucide-react";
 import { api, type Notification } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { useCurrentUser } from "@/lib/useCurrentUser";
+import { useAuth } from "@/lib/auth";
 import Link from "next/link";
 
 export function NotificationBell() {
-  const user = useCurrentUser();
+  const { user: authUser } = useAuth();
+  const user = authUser?.sub ?? null;
   const [open, setOpen] = useState(false);
   const [count, setCount] = useState(0);
   const [notifs, setNotifs] = useState<Notification[]>([]);

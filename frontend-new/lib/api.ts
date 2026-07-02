@@ -1,16 +1,21 @@
 // Typed API client — all calls go to the FastAPI backend.
 // In dev: backend runs on localhost:8077. In prod: same origin (FastAPI serves the static build).
 
-const BASE =
+export const BASE =
   typeof window !== "undefined" && window.location.port !== "3000"
     ? ""                           // prod: same origin
     : "http://localhost:8077";     // dev: explicit backend URL
 
 async function req<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
+    credentials: "include",
     headers: { "Content-Type": "application/json", ...(opts?.headers ?? {}) },
     ...opts,
   });
+  if (res.status === 401) {
+    if (typeof window !== "undefined") window.location.href = "/login";
+    throw new Error("Unauthorized");
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`${res.status}: ${text}`);

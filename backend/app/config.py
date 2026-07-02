@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     # OpenAI API key for pgvector embeddings (Feature 3: repo memory)
     openai_api_key: str = ""
 
+    # GitHub OAuth + JWT session
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    jwt_secret: str = "change-me-in-production"  # override via env
+    jwt_algorithm: str = "HS256"
+    jwt_expire_hours: int = 168  # 7 days
+    frontend_url: str = "http://localhost:3000"
+
 
 @lru_cache
 def get_settings() -> Settings:

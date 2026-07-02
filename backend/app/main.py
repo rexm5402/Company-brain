@@ -6,12 +6,14 @@ the source of truth for "what did the agent do".
 """
 from __future__ import annotations
 
+import secrets
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -38,6 +40,8 @@ from app.tools.github_tool import get_pr_file_paths, get_pr_state, get_pr_commen
 from app.notifications import service as notif_service
 from app.users import service as users_service
 from app.watchdog.webhooks import router as webhooks_router
+from app.auth import service as auth_service
+from app.auth.middleware import get_current_user, get_optional_user
 
 init_observability()
 
@@ -48,9 +52,12 @@ app.include_router(webhooks_router)
 # configured watch channel; switchable at runtime via POST /slack/channel.
 _active_channel: dict[str, str] = {"channel": get_settings().slack_watch_channel}
 
+settings = get_settings()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # dev only
+    allow_origins=[settings.frontend_url],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -89,6 +96,64 @@ def _resolve_active_channel_id(slack: SlackClient) -> str:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# --- Auth (GitHub OAuth) ------------------------------------------------
+
+@app.get("/auth/github")
+def github_login():
+    """Redirect user to GitHub OAuth."""
+    state = secrets.token_urlsafe(16)
+    url = auth_service.github_authorize_url(state)
+    response = RedirectResponse(url)
+    response.set_cookie("oauth_state", state, max_age=600, httponly=True, samesite="lax")
+    return response
+
+
+@app.get("/auth/github/callback")
+def github_callback(code: str, state: str, request: Request):
+    """Handle GitHub OAuth callback — exchange code, upsert user, set JWT cookie."""
+    stored_state = request.cookies.get("oauth_state")
+    if not stored_state or stored_state != state:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+
+    token_data = auth_service.exchange_code(code)
+    access_token = token_data["access_token"]
+
+    gh_user = auth_service.get_github_user(access_token)
+    github_username = gh_user["login"]
+    display_name = gh_user.get("name") or github_username
+    avatar_url = gh_user.get("avatar_url", "")
+
+    users_service.upsert_user(github_username, display_name=display_name)
+
+    jwt_token = auth_service.create_jwt(github_username, display_name, avatar_url)
+
+    response = RedirectResponse(url=f"{settings.frontend_url}/tickets")
+    response.set_cookie(
+        "brain_os_token",
+        jwt_token,
+        max_age=settings.jwt_expire_hours * 3600,
+        httponly=True,
+        samesite="lax",
+        secure=False,  # set True in production with HTTPS
+    )
+    response.delete_cookie("oauth_state")
+    return response
+
+
+@app.get("/auth/me")
+def get_me(user: dict = Depends(get_current_user)):
+    """Return current authenticated user."""
+    return user
+
+
+@app.post("/auth/logout")
+def logout():
+    """Clear the session cookie."""
+    response = JSONResponse({"status": "logged out"})
+    response.delete_cookie("brain_os_token")
+    return response
 
 
 @app.get("/slack/channels")

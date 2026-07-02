@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LayoutDashboard, Ticket, Zap, Settings, Brain, GitBranch } from "lucide-react";
 import { NotificationBell } from "./NotificationBell";
-import { useCurrentUser } from "@/lib/useCurrentUser";
+import { useAuth, signOut } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -27,8 +27,9 @@ const SIDEBAR_NAV = [
 
 export function Sidebar() {
   const path = usePathname();
-  const user = useCurrentUser();
-  const initials = user ? user.slice(0, 2).toUpperCase() : "??";
+  const { user } = useAuth();
+  const displayName = user?.name || user?.sub || null;
+  const initials = displayName ? displayName.slice(0, 2).toUpperCase() : "??";
 
   return (
     <aside
@@ -83,12 +84,24 @@ export function Sidebar() {
           </button>
         </div>
         {user && (
-          <div className="flex items-center gap-2.5 px-2 py-1.5">
-            <div className="w-7 h-7 rounded-full bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center shrink-0">
-              <span className="text-[10px] font-bold text-indigo-400">{initials}</span>
-            </div>
-            <span className="text-xs text-[#888] truncate">{user}</span>
-          </div>
+          <button
+            onClick={signOut}
+            title="Sign out"
+            className="flex items-center gap-2.5 px-2 py-1.5 w-full rounded-md hover:bg-[#1a1a1a] transition-colors text-left"
+          >
+            {user.avatar ? (
+              <img
+                src={user.avatar}
+                alt={displayName || ""}
+                className="w-7 h-7 rounded-full shrink-0"
+              />
+            ) : (
+              <div className="w-7 h-7 rounded-full bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center shrink-0">
+                <span className="text-[10px] font-bold text-indigo-400">{initials}</span>
+              </div>
+            )}
+            <span className="text-xs text-[#888] truncate">{displayName}</span>
+          </button>
         )}
       </div>
     </aside>
